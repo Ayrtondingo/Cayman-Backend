@@ -46,4 +46,6 @@ export class UsersController {
     const clerkId = req.user.id; 
     return await this.usersService.syncWithCentralBank(clerkId, data);
   }
+
+  
 }

@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: cayman-backend
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /api
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: USE_DATABASE_URL
+        value: true
+      - key: FRONTEND_URLS
+        sync: false
+      - key: ALLOW_VERCEL_PREVIEWS
+        value: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CENTRAL_BANK_API_KEY
+        sync: false
+      - key: CENTRAL_BANK_URL
+        value: https://centralbank.brocoly.cc/api
+      - key: CENTRAL_BANK_ENV
+        value: test
+      - key: BANK_ID
+        sync: false
+      - key: BANK_CODE
+        value: 19
+      - key: BANK_NAME
+        value: Cayman-Shadow-Bank

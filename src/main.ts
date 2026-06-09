@@ -12,7 +12,7 @@ async function bootstrap() {
   const allowedOrigins = Array.from(
     new Set([...frontendUrls, 'http://localhost:5173', 'http://127.0.0.1:5173']),
   );
-  const allowVercelPreviews = process.env.ALLOW_VERCEL_PREVIEWS === 'true';
+  const allowVercelPreviews = process.env.ALLOW_VERCEL_PREVIEWS !== 'false';
 
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe());

@@ -3,6 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
+import { UsersService } from '../users/users.service';
+import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
 
 @Injectable()
 export class AdminService {
@@ -11,6 +13,7 @@ export class AdminService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(Account)
     private readonly accountRepository: Repository<Account>,
+    private readonly usersService: UsersService,
   ) {}
 
   async getAllUsers() {
@@ -50,5 +53,11 @@ export class AdminService {
     target.role = newRole;
     await this.userRepository.save(target);
     return { id: target.id, role: target.role };
+  }
+
+  async grantClientAccess(targetUserId: string, data: CreatePersonDto) {
+    const target = await this.userRepository.findOne({ where: { id: targetUserId } });
+    if (!target) throw new NotFoundException('Usuario no encontrado');
+    return this.usersService.syncWithCentralBank(targetUserId, data);
   }
 }

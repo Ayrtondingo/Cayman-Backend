@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+  Req,
+} from '@nestjs/common';
 import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
 import { AdminService } from './admin.service';
 import { ClerkAuthGuard } from '../auth/clerk.guard';
@@ -25,7 +34,11 @@ export class AdminController {
 
   @Patch('users/:id/role')
   @Roles(UserRole.GERENTE)
-  changeRole(@Req() req, @Param('id') id: string, @Body('role') role: UserRole) {
+  changeRole(
+    @Req() req,
+    @Param('id') id: string,
+    @Body('role') role: UserRole,
+  ) {
     return this.adminService.changeRole(req.user.id, id, role);
   }
 

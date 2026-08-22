@@ -11,7 +11,7 @@ import { CentralBankModule } from '../central-bank/central-bank.module'; // <-- 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Transaction, Account]),
-    UsersModule,      // Importamos para que Transactions pueda usar UsersService
+    UsersModule, // Importamos para que Transactions pueda usar UsersService
     CentralBankModule, // <-- IMPORTANTE: Ahora Transactions puede usar CentralBankService
   ],
   controllers: [TransactionsController],

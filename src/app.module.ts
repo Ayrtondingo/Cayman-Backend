@@ -59,7 +59,12 @@ import { ChatModule } from './chat/chat.module';
             connectionTimeoutMillis: 5000,
           },
           autoLoadEntities: true,
-          synchronize: true,
+          // Apagado por defecto. Con `synchronize` prendido, TypeORM altera la
+          // base real sin que nadie revise el SQL: un renombre de columna lo
+          // resuelve con DROP + ADD y se lleva los datos puestos.
+          // En produccion el esquema se aplica con los scripts de migrations/.
+          // En local se prende con DB_SYNCHRONIZE=true.
+          synchronize: configService.get<string>('DB_SYNCHRONIZE') === 'true',
         };
       },
     }),

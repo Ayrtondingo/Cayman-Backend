@@ -15,6 +15,10 @@ services:
         value: true
       - key: DATABASE_URL
         sync: false
+      # NUNCA true en produccion: TypeORM alteraria la base sin revision.
+      # El esquema se aplica con los scripts de migrations/.
+      - key: DB_SYNCHRONIZE
+        value: false
 
       # -------------------------------------------------------------------- CORS
       # Poner acá la URL de producción del frontend en Vercel, separadas por coma.

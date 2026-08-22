@@ -1,0 +1,78 @@
+-- ============================================================================
+-- Esquema de los modulos nuevos: tarjetas, prestamos, servicios, recargas,
+-- inversiones, seguros y asistente.
+--
+-- Ejecutar DESPUES de 001 y ANTES de arrancar el backend con
+-- DB_SYNCHRONIZE en false.
+--
+-- Generado con el schema builder de TypeORM contra una replica del esquema
+-- de produccion, no escrito a mano: es exactamente el SQL que `synchronize`
+-- habria corrido.
+--
+-- Tambien recrea las foreign keys de accounts y transactions, que ahora
+-- llevan ON DELETE CASCADE.
+-- ============================================================================
+
+BEGIN;
+
+ALTER TABLE "transactions" DROP CONSTRAINT "transactions_accountId_fkey";
+ALTER TABLE "accounts" DROP CONSTRAINT "accounts_userId_fkey";
+CREATE TYPE "public"."utility_bills_status_enum" AS ENUM('pendiente', 'pagada');
+CREATE TABLE "utility_bills" ("id" SERIAL NOT NULL, "numeroCliente" character varying NOT NULL, "importe" numeric(12,2) NOT NULL, "vencimiento" date NOT NULL, "status" "public"."utility_bills_status_enum" NOT NULL DEFAULT 'pendiente', "paidAt" TIMESTAMP, "paidByUserId" character varying, "companyId" integer, CONSTRAINT "PK_7618d9af9616422f5d25ddff5bf" PRIMARY KEY ("id"));
+CREATE INDEX "IDX_facbc3162d6ed6d0caf53847d3" ON "utility_bills" ("companyId", "numeroCliente") ;
+CREATE TABLE "utility_companies" ("id" SERIAL NOT NULL, "nombre" character varying NOT NULL, "rubro" character varying NOT NULL, CONSTRAINT "UQ_1e7b4021191856f5871359e48c5" UNIQUE ("nombre"), CONSTRAINT "PK_bac829d0a6bb3984ede97f829e4" PRIMARY KEY ("id"));
+CREATE TYPE "public"."topups_status_enum" AS ENUM('aprobada', 'rechazada');
+CREATE TABLE "topups" ("id" SERIAL NOT NULL, "operadora" character varying NOT NULL, "numero" character varying NOT NULL, "amount" numeric(12,2) NOT NULL, "status" "public"."topups_status_enum" NOT NULL, "motivo" character varying, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_fbfc343134573ee4a34f9785208" PRIMARY KEY ("id"));
+CREATE TYPE "public"."loans_status_enum" AS ENUM('vigente', 'cancelado');
+CREATE TABLE "loans" ("id" SERIAL NOT NULL, "amount" numeric(12,2) NOT NULL, "termMonths" integer NOT NULL, "tna" numeric(6,4) NOT NULL, "installmentAmount" numeric(12,2) NOT NULL, "status" "public"."loans_status_enum" NOT NULL DEFAULT 'vigente', "cbu" character varying NOT NULL, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_5c6942c1e13e4de135c5203ee61" PRIMARY KEY ("id"));
+CREATE TYPE "public"."loan_installments_status_enum" AS ENUM('pendiente', 'pagada');
+CREATE TABLE "loan_installments" ("id" SERIAL NOT NULL, "number" integer NOT NULL, "principal" numeric(12,2) NOT NULL, "interest" numeric(12,2) NOT NULL, "total" numeric(12,2) NOT NULL, "remainingPrincipal" numeric(12,2) NOT NULL, "dueDate" date NOT NULL, "status" "public"."loan_installments_status_enum" NOT NULL DEFAULT 'pendiente', "paidAt" TIMESTAMP, "loanId" integer, CONSTRAINT "UQ_installment_loan_number" UNIQUE ("loanId", "number"), CONSTRAINT "PK_d69494e8c24dd3a2131f4d10168" PRIMARY KEY ("id"));
+CREATE TYPE "public"."fixed_terms_type_enum" AS ENUM('tradicional', 'uva');
+CREATE TYPE "public"."fixed_terms_status_enum" AS ENUM('vigente', 'vencido', 'acreditado');
+CREATE TABLE "fixed_terms" ("id" SERIAL NOT NULL, "capital" numeric(12,2) NOT NULL, "termDays" integer NOT NULL, "tna" numeric(6,4) NOT NULL, "type" "public"."fixed_terms_type_enum" NOT NULL DEFAULT 'tradicional', "uvaAtStart" numeric(12,4), "maturityDate" date NOT NULL, "status" "public"."fixed_terms_status_enum" NOT NULL DEFAULT 'vigente', "cbu" character varying NOT NULL, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_3406d051589628e04334338b579" PRIMARY KEY ("id"));
+CREATE TYPE "public"."cedear_orders_type_enum" AS ENUM('compra', 'venta');
+CREATE TABLE "cedear_orders" ("id" SERIAL NOT NULL, "ticker" character varying NOT NULL, "quantity" integer NOT NULL, "type" "public"."cedear_orders_type_enum" NOT NULL, "price" numeric(12,2) NOT NULL, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_84122b53729b41f08ca65aea3f4" PRIMARY KEY ("id"));
+CREATE INDEX "IDX_dcbe0ffdf4f42564d01184741b" ON "cedear_orders" ("userId", "ticker") ;
+CREATE TABLE "insurance_products" ("id" SERIAL NOT NULL, "nombre" character varying NOT NULL, "tipo" character varying NOT NULL, "tasaBase" numeric(8,6) NOT NULL, CONSTRAINT "UQ_dd1c459b37aabcd9eb43b7eed55" UNIQUE ("nombre"), CONSTRAINT "PK_36ac5b506fcc1644ddf95580824" PRIMARY KEY ("id"));
+CREATE TYPE "public"."insurance_claims_status_enum" AS ENUM('en_analisis', 'aprobado', 'rechazado');
+CREATE TABLE "insurance_claims" ("id" SERIAL NOT NULL, "descripcion" character varying NOT NULL, "status" "public"."insurance_claims_status_enum" NOT NULL DEFAULT 'en_analisis', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "policyId" integer, CONSTRAINT "PK_c6f7929fdcec8c17a24034a48d3" PRIMARY KEY ("id"));
+CREATE TYPE "public"."insurance_policies_status_enum" AS ENUM('vigente', 'cancelada');
+CREATE TABLE "insurance_policies" ("id" SERIAL NOT NULL, "sumaAsegurada" numeric(14,2) NOT NULL, "prima" numeric(12,2) NOT NULL, "edadAlContratar" integer NOT NULL, "beneficiarios" jsonb NOT NULL DEFAULT '[]', "status" "public"."insurance_policies_status_enum" NOT NULL DEFAULT 'vigente', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "productId" integer, "userId" character varying, CONSTRAINT "PK_69af1d3a19277d1a822c9b13bf1" PRIMARY KEY ("id"));
+CREATE TYPE "public"."chat_messages_role_enum" AS ENUM('user', 'assistant');
+CREATE TABLE "chat_messages" ("id" SERIAL NOT NULL, "role" "public"."chat_messages_role_enum" NOT NULL, "content" text NOT NULL, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_40c55ee0e571e268b0d3cd37d10" PRIMARY KEY ("id"));
+CREATE INDEX "IDX_57e7ca830e61203898e7404155" ON "chat_messages" ("userId", "createdAt") ;
+CREATE TYPE "public"."card_authorizations_status_enum" AS ENUM('aprobada', 'rechazada');
+CREATE TABLE "card_authorizations" ("id" SERIAL NOT NULL, "comercio" character varying NOT NULL, "amount" numeric(12,2) NOT NULL, "cuotas" integer NOT NULL DEFAULT '1', "status" "public"."card_authorizations_status_enum" NOT NULL, "motivo" character varying, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "cardId" integer, CONSTRAINT "PK_8240e2f5a7ff8cfc26ee27463aa" PRIMARY KEY ("id"));
+CREATE TYPE "public"."cards_type_enum" AS ENUM('debito', 'credito');
+CREATE TYPE "public"."cards_status_enum" AS ENUM('activa', 'bloqueada');
+CREATE TABLE "cards" ("id" SERIAL NOT NULL, "type" "public"."cards_type_enum" NOT NULL, "number" character varying NOT NULL, "cbuAsociado" character varying, "limite" numeric(12,2), "status" "public"."cards_status_enum" NOT NULL DEFAULT 'activa', "expiresAt" date NOT NULL, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "UQ_5deec73c016e2940ce4ced835e2" UNIQUE ("number"), CONSTRAINT "PK_5f3269634705fdff4a9935860fc" PRIMARY KEY ("id"));
+CREATE TYPE "public"."chat_escalations_status_enum" AS ENUM('pendiente', 'en_curso', 'resuelta');
+CREATE TABLE "chat_escalations" ("id" SERIAL NOT NULL, "motivo" text NOT NULL, "status" "public"."chat_escalations_status_enum" NOT NULL DEFAULT 'pendiente', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "userId" character varying, CONSTRAINT "PK_8220bae66d0e1f895af73e3e692" PRIMARY KEY ("id"));
+ALTER TABLE "accounts" ADD CONSTRAINT "UQ_38b11b5b29521765ca11082a2ea" UNIQUE ("cbu");
+ALTER TABLE "accounts" ADD CONSTRAINT "UQ_a5f4f991f324bd85b79afb8d371" UNIQUE ("alias");
+ALTER TABLE "users" ADD CONSTRAINT "UQ_5fe9cfa518b76c96518a206b350" UNIQUE ("dni");
+ALTER TABLE "accounts" ADD CONSTRAINT "UQ_account_user_currency" UNIQUE ("userId", "currency");
+ALTER TABLE "utility_bills" ADD CONSTRAINT "FK_f172c6e196a6fe3ef07b48d84df" FOREIGN KEY ("companyId") REFERENCES "utility_companies"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "transactions" ADD CONSTRAINT "FK_26d8aec71ae9efbe468043cd2b9" FOREIGN KEY ("accountId") REFERENCES "accounts"("id") ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE "accounts" ADD CONSTRAINT "FK_3aa23c0a6d107393e8b40e3e2a6" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "topups" ADD CONSTRAINT "FK_c909c1a4f0b93d4ac6462923ad7" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "loans" ADD CONSTRAINT "FK_4c2ab4e556520045a2285916d45" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "loan_installments" ADD CONSTRAINT "FK_d5e31e586cc96ce27d00831f12d" FOREIGN KEY ("loanId") REFERENCES "loans"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "fixed_terms" ADD CONSTRAINT "FK_d287a262b910c676fec23660c83" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "cedear_orders" ADD CONSTRAINT "FK_09043745b6b64b5c47dd26645a6" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "insurance_claims" ADD CONSTRAINT "FK_ef0233f5751c8f5bb838dcc9c51" FOREIGN KEY ("policyId") REFERENCES "insurance_policies"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "insurance_policies" ADD CONSTRAINT "FK_bb5bc529bac0368ab231429802d" FOREIGN KEY ("productId") REFERENCES "insurance_products"("id") ON DELETE RESTRICT ON UPDATE NO ACTION;
+ALTER TABLE "insurance_policies" ADD CONSTRAINT "FK_c76434dc53acdd818f5637bc8b9" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "chat_messages" ADD CONSTRAINT "FK_43d968962b9e24e1e3517c0fbff" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "card_authorizations" ADD CONSTRAINT "FK_ff9f8b20fc41f3123f35c5dfc49" FOREIGN KEY ("cardId") REFERENCES "cards"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "cards" ADD CONSTRAINT "FK_7b7230897ecdeb7d6b0576d907b" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+ALTER TABLE "chat_escalations" ADD CONSTRAINT "FK_559210556209f3317caa648d811" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE NO ACTION;
+COMMIT;
+
+-- Verificacion: tienen que aparecer las 14 tablas nuevas.
+SELECT count(*) AS tablas_nuevas FROM information_schema.tables
+WHERE table_schema = 'public' AND table_name IN (
+  'cards','card_authorizations','loans','loan_installments','utility_companies',
+  'utility_bills','topups','fixed_terms','cedear_orders','insurance_products',
+  'insurance_policies','insurance_claims','chat_messages','chat_escalations'
+);

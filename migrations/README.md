@@ -23,7 +23,20 @@ transacción: si algo falla, no queda a medias.
 
 ## Cómo aplicarlos
 
-### Opción A: con el script (recomendado)
+### Opción A: pegar un archivo en el SQL Editor (lo más simple)
+
+`MIGRACION-COMPLETA.sql` junta los dos scripts en una sola transacción. No hace
+falta ninguna credencial ni herramienta: Supabase → **SQL Editor** → *New query*
+→ pegar todo → **Run**.
+
+Al final imprime una fila de verificación. Tiene que dar:
+
+- `cuentas_con_cbu` igual a `cuentas` (ningún CBU se perdió)
+- `tablas_nuevas` = 14
+
+Es seguro reejecutarlo.
+
+### Opción B: con el script
 
 Poné en el `.env` la cadena de conexión, que se saca de Supabase en
 **Connect → Transaction pooler**:
@@ -46,7 +59,7 @@ correr sin problema.
 Usá el host del **pooler**, no `db.<ref>.supabase.co`: ese es IPv6-only y
 Render en plan free no tiene salida IPv6.
 
-### Opción B: a mano en Supabase
+### Opción C: script por script, a mano
 
 1. Dashboard → **SQL Editor**.
 2. Pegar el contenido de `001`, **Run**. Revisar que la verificación del final

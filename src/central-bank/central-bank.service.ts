@@ -306,6 +306,14 @@ export class CentralBankService {
 
   // ----------------------------------------------------------- Transacciones
 
+  /**
+   * POST /transactions.
+   *
+   * Un 422 NO es un error de integracion: es un rechazo de negocio (saldo
+   * insuficiente). El Banco Central igual lo registra con estado "rechazada",
+   * asi que hay que devolverlo para poder guardarlo de este lado y explicarle
+   * al cliente por que no paso. Los 400 y 404 si son errores y se propagan.
+   */
   async registerTransaction(data: {
     cbuOrigen: string;
     cbuDestino: string;
@@ -318,6 +326,22 @@ export class CentralBankService {
       });
       return response.data;
     } catch (error) {
+      const axiosError = error as AxiosError<{
+        error?: string;
+        estado?: string;
+        motivoRechazo?: string;
+      }>;
+
+      if (axiosError.response?.status === 422) {
+        const cuerpo = axiosError.response.data ?? {};
+        return {
+          ...cuerpo,
+          estado: cuerpo.estado ?? 'rechazada',
+          // El listado devuelve `motivoRechazo`, pero el 422 lo manda en `error`.
+          motivoRechazo: cuerpo.motivoRechazo ?? cuerpo.error ?? 'Transferencia rechazada',
+        };
+      }
+
       this.fail('registrar transferencia', error);
     }
   }

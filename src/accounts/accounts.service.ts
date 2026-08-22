@@ -20,6 +20,9 @@ import {
 /** Redondeo a 2 decimales, para no arrastrar el error del punto flotante a los saldos. */
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
+/** Bono de bienvenida al abrir la caja en dolares. */
+const BONO_USD = Number(process.env.BONO_APERTURA_USD ?? 10000);
+
 @Injectable()
 export class AccountsService {
   constructor(
@@ -134,6 +137,8 @@ export class AccountsService {
       currency,
     );
 
+    const esNueva = !existing;
+
     const account =
       existing ??
       this.accountRepository.create({
@@ -145,7 +150,32 @@ export class AccountsService {
     account.cbu = remote.cbu;
     account.alias = remote.alias ?? account.alias ?? null;
 
-    return this.accountRepository.save(account);
+    // Bono de bienvenida, solo al abrir la caja en dolares por primera vez.
+    // Va con su movimiento: la plata no puede aparecer sin explicacion.
+    const bono = esNueva && currency === Currency.USD ? BONO_USD : 0;
+
+    if (bono <= 0) {
+      return this.accountRepository.save(account);
+    }
+
+    account.balance = round2(Number(account.balance) + bono);
+
+    return this.dataSource.transaction(async (manager) => {
+      const guardada = await manager.save(Account, account);
+
+      await manager.save(
+        manager.create(Transaction, {
+          amount: bono,
+          type: TransactionType.DEPOSIT,
+          category: TransactionCategory.DEPOSITO,
+          description: 'Bono de bienvenida por abrir la caja en dolares',
+          status: TransactionStatus.LOCAL,
+          account: guardada,
+        }),
+      );
+
+      return guardada;
+    });
   }
 
   // ------------------------------------------------------ Operaciones de caja
@@ -172,6 +202,11 @@ export class AccountsService {
     }
   }
 
+  /**
+   * @deprecated El cliente no puede acreditarse plata a si mismo. Los ajustes
+   * de saldo los hace el gerente desde administracion, que ademas deja
+   * registrado quien los hizo. Se mantiene el metodo para uso interno.
+   */
   async deposit(clerkId: string, cbu: string, monto: number) {
     this.assertPositive(monto);
     const account = await this.ownedAccount(clerkId, cbu);

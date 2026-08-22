@@ -43,23 +43,10 @@ export class AccountsController {
     return this.accountsService.openAccount(this.clerkId(req), currency);
   }
 
-  @Post(':cbu/depositos')
-  async deposit(
-    @Request() req,
-    @Param('cbu') cbu: string,
-    @Body('monto') monto: number,
-  ) {
-    return this.accountsService.deposit(this.clerkId(req), cbu, Number(monto));
-  }
-
-  @Post(':cbu/extracciones')
-  async withdraw(
-    @Request() req,
-    @Param('cbu') cbu: string,
-    @Body('monto') monto: number,
-  ) {
-    return this.accountsService.withdraw(this.clerkId(req), cbu, Number(monto));
-  }
+  // Depositar y extraer no son operaciones del cliente: se sacaron a
+  // proposito. Acreditar o debitar una cuenta lo hace el gerente desde
+  // PATCH /admin/users/:id/balance, que ademas registra quien lo hizo.
+  // El cliente mueve plata por transferencia, cambio de divisas o pagos.
 
   @Get(':cbu/movimientos')
   async getMovements(@Request() req, @Param('cbu') cbu: string) {

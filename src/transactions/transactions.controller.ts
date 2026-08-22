@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Post, Request, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Request,
+  UseGuards,
+} from '@nestjs/common';
 import { TransactionsService } from './transactions.service';
 import { ClerkAuthGuard } from '../auth/clerk.guard';
 
@@ -27,7 +34,12 @@ export class TransactionsController {
       body.destinatario ?? body.alias ?? body.cbuDestino ?? body.destinationCbu;
     const amount = Number(body.monto ?? body.amount);
 
-    return this.transactionsService.createTransfer(userId, destinatario, amount, body.motivo);
+    return this.transactionsService.createTransfer(
+      userId,
+      destinatario,
+      amount,
+      body.motivo,
+    );
   }
 
   @Get('history')

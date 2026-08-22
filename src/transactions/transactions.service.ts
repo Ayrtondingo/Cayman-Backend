@@ -1,12 +1,18 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
   Transaction,
+  TransactionCategory,
   TransactionStatus,
   TransactionType,
 } from './entities/transaction.entity';
 import { Account } from '../accounts/entities/account.entity';
+import { Currency } from '../common/enums/currency.enum';
 import { CentralBankService } from '../central-bank/central-bank.service';
 
 const CBU_REGEX = /^\d{22}$/;
@@ -21,7 +27,13 @@ export class TransactionsService {
     private readonly centralBankService: CentralBankService,
   ) {}
 
-  async createTransfer(clerkId: string, destinatario?: string, amount?: number, reason?: string) {
+  async createTransfer(
+    clerkId: string,
+    destinatario?: string,
+    amount?: number,
+    reason?: string,
+    currency: Currency = Currency.ARS,
+  ) {
     if (!destinatario) {
       throw new BadRequestException('Debe indicar un CBU o alias destino');
     }
@@ -35,52 +47,82 @@ export class TransactionsService {
     let receiverName: string | undefined;
 
     if (!CBU_REGEX.test(destinatario)) {
-      const person = await this.centralBankService.getPersonByAlias(destinatario);
-      receiverCbu = person.cbu;
-      receiverName = `${person.nombre} ${person.apellido}`;
+      const target = await this.centralBankService.resolveAlias(destinatario);
+
+      if (!target) {
+        throw new NotFoundException(
+          `No existe ninguna cuenta con el alias ${destinatario}`,
+        );
+      }
+
+      receiverCbu = target.cbu;
+      receiverName = target.nombre
+        ? `${target.nombre} ${target.apellido ?? ''}`.trim()
+        : undefined;
     }
 
     if (!CBU_REGEX.test(receiverCbu)) {
-      throw new BadRequestException('CBU destino invalido (debe tener 22 digitos)');
+      throw new BadRequestException(
+        'CBU destino invalido (debe tener 22 digitos)',
+      );
     }
 
     const senderAccount = await this.accountRepository.findOne({
-      where: { user: { id: clerkId } },
+      where: { user: { id: clerkId }, currency },
       relations: ['user'],
     });
 
     if (!senderAccount) {
-      throw new NotFoundException('Cuenta emisora no encontrada');
+      throw new NotFoundException(
+        `Cuenta emisora en ${currency} no encontrada`,
+      );
     }
 
-    if (senderAccount.accountNumber === receiverCbu) {
-      throw new BadRequestException('El CBU origen no puede ser igual al destino');
+    if (!senderAccount.cbu) {
+      throw new BadRequestException(
+        'La cuenta emisora todavia no tiene CBU. Sincronizala con el Banco Central.',
+      );
     }
 
-    const centralTransaction = await this.centralBankService.registerTransaction({
-      cbuOrigen: senderAccount.accountNumber,
-      cbuDestino: receiverCbu,
-      importe: amount,
-      saldoOrigen: Number(senderAccount.balance),
-    });
+    if (senderAccount.cbu === receiverCbu) {
+      throw new BadRequestException(
+        'El CBU origen no puede ser igual al destino',
+      );
+    }
+
+    const centralTransaction =
+      await this.centralBankService.registerTransaction({
+        cbuOrigen: senderAccount.cbu,
+        cbuDestino: receiverCbu,
+        importe: amount,
+        saldoOrigen: Number(senderAccount.balance),
+      });
 
     // La API devuelve nombreDestino en la respuesta aprobada
-    const counterpartyName = receiverName || centralTransaction.nombreDestino || undefined;
+    const counterpartyName =
+      receiverName || centralTransaction.nombreDestino || undefined;
 
     if (centralTransaction.estado !== TransactionStatus.APPROVED) {
       const rejected = this.transactionRepository.create({
         amount: -amount,
         type: TransactionType.TRANSFER,
-        description: centralTransaction.motivoRechazo || reason || `Transferencia rechazada a ${destinatario}`,
+        category: TransactionCategory.TRANSFERENCIA,
+        description:
+          centralTransaction.motivoRechazo ||
+          reason ||
+          `Transferencia rechazada a ${destinatario}`,
         account: senderAccount,
         counterpartyCbu: receiverCbu,
         counterpartyName,
-        externalTransactionId: centralTransaction.transaccionId || centralTransaction._id,
+        externalTransactionId:
+          centralTransaction.transaccionId || centralTransaction._id,
         status: TransactionStatus.REJECTED,
       });
 
       await this.transactionRepository.save(rejected);
-      throw new BadRequestException(centralTransaction.motivoRechazo || 'Transferencia rechazada');
+      throw new BadRequestException(
+        centralTransaction.motivoRechazo || 'Transferencia rechazada',
+      );
     }
 
     senderAccount.balance = Number(senderAccount.balance) - amount;
@@ -89,23 +131,25 @@ export class TransactionsService {
     const transaction = this.transactionRepository.create({
       amount: -amount,
       type: TransactionType.TRANSFER,
+      category: TransactionCategory.TRANSFERENCIA,
       description: reason || `Transferencia a ${destinatario}`,
       account: senderAccount,
       counterpartyCbu: receiverCbu,
       counterpartyName,
-      externalTransactionId: centralTransaction.transaccionId || centralTransaction._id,
+      externalTransactionId:
+        centralTransaction.transaccionId || centralTransaction._id,
       status: TransactionStatus.APPROVED,
     });
 
     return this.toFrontendTransaction(
       await this.transactionRepository.save(transaction),
-      senderAccount.accountNumber,
+      senderAccount.cbu,
     );
   }
 
-  async getCombinedHistory(clerkId: string) {
+  async getCombinedHistory(clerkId: string, currency: Currency = Currency.ARS) {
     const account = await this.accountRepository.findOne({
-      where: { user: { id: clerkId } },
+      where: { user: { id: clerkId }, currency },
       relations: ['user'],
     });
 
@@ -122,18 +166,23 @@ export class TransactionsService {
     });
 
     return localTransactions.map((transaction) =>
-      this.toFrontendTransaction(transaction, account.accountNumber),
+      this.toFrontendTransaction(transaction, account.cbu),
     );
   }
 
   private async syncIncomingTransactions(account: Account) {
-    const centralTransactions = await this.centralBankService.getTransactions(30);
+    const centralTransactions =
+      await this.centralBankService.getTransactions(30);
 
     for (const tx of centralTransactions) {
       const externalId = tx._id || tx.transaccionId;
-      const isIncoming = tx.cbuDestino === account.accountNumber;
+      const isIncoming = tx.cbuDestino === account.cbu;
 
-      if (!externalId || !isIncoming || tx.estado !== TransactionStatus.APPROVED) {
+      if (
+        !externalId ||
+        !isIncoming ||
+        tx.estado !== TransactionStatus.APPROVED
+      ) {
         continue;
       }
 
@@ -152,7 +201,9 @@ export class TransactionsService {
       if (tx.nombreOrigen) {
         senderName = tx.nombreOrigen;
       } else {
-        const person = await this.centralBankService.getPersonByCbu(tx.cbuOrigen);
+        const person = await this.centralBankService.getPersonByCbu(
+          tx.cbuOrigen,
+        );
         if (person) senderName = `${person.nombre} ${person.apellido}`;
       }
 
@@ -162,7 +213,10 @@ export class TransactionsService {
       const incoming = this.transactionRepository.create({
         amount,
         type: TransactionType.TRANSFER,
-        description: senderName ? `Recibido de ${senderName}` : `Recibido de CBU: ${tx.cbuOrigen}`,
+        category: TransactionCategory.TRANSFERENCIA,
+        description: senderName
+          ? `Recibido de ${senderName}`
+          : `Recibido de CBU: ${tx.cbuOrigen}`,
         account,
         counterpartyCbu: tx.cbuOrigen,
         counterpartyName: senderName,

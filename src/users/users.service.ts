@@ -1,8 +1,14 @@
-import { Injectable, HttpException, HttpStatus, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  HttpException,
+  HttpStatus,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User, UserRole } from './entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
+import { Currency } from '../common/enums/currency.enum';
 import { CentralBankService } from '../central-bank/central-bank.service';
 import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
 
@@ -15,7 +21,8 @@ interface CentralBankTx {
   createdAt: string;
 }
 
-const isValidCbu = (cbu?: string | null) => Boolean(cbu && /^\d{22}$/.test(cbu));
+const isValidCbu = (cbu?: string | null) =>
+  Boolean(cbu && /^\d{22}$/.test(cbu));
 
 @Injectable()
 export class UsersService {
@@ -30,7 +37,7 @@ export class UsersService {
   async syncWithCentralBank(userId: string, data: CreatePersonDto) {
     let user = await this.userRepository.findOne({
       where: { id: userId },
-      relations: ['account'],
+      relations: ['accounts'],
     });
 
     if (!user) {
@@ -43,15 +50,20 @@ export class UsersService {
       );
     }
 
-    const account = await this.ensureAccount(user);
+    const account = await this.ensurePrimaryAccount(user);
     const centralBankData = await this.centralBankService.registerPerson(data);
 
-    account.accountNumber = centralBankData.cbu;
+    account.cbu = centralBankData.cbu;
     account.alias = centralBankData.alias ?? account.alias;
     user.fullName = `${centralBankData.nombre} ${centralBankData.apellido}`;
+    // Guardar el DNI es lo que despues habilita /accounts y /central-deudores.
+    user.dni = String(data.dni);
 
     if (data.alias) {
-      await this.centralBankService.updateAlias(centralBankData.cbu, data.alias);
+      await this.centralBankService.updateAlias(
+        centralBankData.cbu,
+        data.alias,
+      );
       account.alias = data.alias;
     }
 
@@ -62,8 +74,9 @@ export class UsersService {
 
     return {
       message: 'CBU sincronizado exitosamente',
-      cbu: account.accountNumber,
+      cbu: account.cbu,
       alias: account.alias,
+      dni: user.dni,
       account,
     };
   }
@@ -71,7 +84,7 @@ export class UsersService {
   async findOne(id: string): Promise<User | null> {
     return this.userRepository.findOne({
       where: { id },
-      relations: ['account'],
+      relations: ['accounts'],
     });
   }
 
@@ -81,7 +94,7 @@ export class UsersService {
 
     let user = await this.userRepository.findOne({
       where: [{ id: clerkId }, { email: normalizedEmail }],
-      relations: ['account'],
+      relations: ['accounts'],
     });
 
     if (user) {
@@ -100,7 +113,7 @@ export class UsersService {
     }
 
     const savedUser = await this.userRepository.save(user);
-    const account = await this.ensureAccount(savedUser);
+    const account = await this.ensurePrimaryAccount(savedUser);
 
     return {
       message: 'Usuario sincronizado',
@@ -112,14 +125,14 @@ export class UsersService {
   async findOneByEmail(email: string): Promise<User | null> {
     return this.userRepository.findOne({
       where: { email },
-      relations: ['account'],
+      relations: ['accounts'],
     });
   }
 
   async findById(id: string) {
     const user = await this.userRepository.findOne({
       where: { id },
-      relations: ['account'],
+      relations: ['accounts'],
     });
     if (!user) throw new NotFoundException('Usuario no encontrado');
     return user;
@@ -135,34 +148,54 @@ export class UsersService {
 
   async updateAlias(clerkId: string, alias: string) {
     const user = await this.findById(clerkId);
-    const account = await this.ensureAccount(user);
+    const account = await this.ensurePrimaryAccount(user);
 
-    if (!isValidCbu(account.accountNumber)) {
+    if (!isValidCbu(account.cbu)) {
       throw new HttpException('CBU_NOT_LINKED', HttpStatus.BAD_REQUEST);
     }
 
-    await this.centralBankService.updateAlias(account.accountNumber, alias);
+    await this.centralBankService.updateAlias(account.cbu, alias);
     account.alias = alias;
     await this.accountRepository.save(account);
 
     return { message: 'ALIAS_UPDATED_SUCCESSFULLY', alias };
   }
 
+  /**
+   * Situacion crediticia del cliente en el Banco Central.
+   * Devuelve null si el DNI todavia no figura informado por ninguna entidad.
+   */
+  async getCreditSituation(clerkId: string) {
+    const user = await this.findById(clerkId);
+
+    if (!user.dni) {
+      throw new HttpException('DNI_NOT_LINKED', HttpStatus.BAD_REQUEST);
+    }
+
+    return this.centralBankService.getCreditSituation(user.dni);
+  }
+
   async getCombinedHistory(clerkId: string) {
     const user = await this.findOne(clerkId);
-    if (!user || !user.account?.accountNumber) return [];
+    const primary = user?.accounts?.find(
+      (account) => account.currency === Currency.ARS,
+    );
 
-    const myCbu = user.account.accountNumber;
+    if (!primary?.cbu) return [];
+
+    const myCbu = primary.cbu;
 
     try {
       const allCentralTxs = await this.centralBankService.getTransactions();
       const myTxs = allCentralTxs.filter(
-        (tx: CentralBankTx) => tx.cbuOrigen === myCbu || tx.cbuDestino === myCbu,
+        (tx: CentralBankTx) =>
+          tx.cbuOrigen === myCbu || tx.cbuDestino === myCbu,
       );
 
       return myTxs.map((tx: CentralBankTx) => ({
         id: tx.id || tx._id,
-        amount: tx.cbuDestino === myCbu ? Number(tx.importe) : -Number(tx.importe),
+        amount:
+          tx.cbuDestino === myCbu ? Number(tx.importe) : -Number(tx.importe),
         description:
           tx.cbuDestino === myCbu
             ? `Recibido de: ${tx.cbuOrigen}`
@@ -175,28 +208,36 @@ export class UsersService {
     }
   }
 
-  private async ensureAccount(user: User): Promise<Account> {
-    if (user.account) return user.account;
+  /**
+   * Garantiza que exista la caja de ahorro en pesos, que es la cuenta principal
+   * y la unica que se crea sola al dar de alta al cliente.
+   */
+  private async ensurePrimaryAccount(user: User): Promise<Account> {
+    const loaded = user.accounts?.find(
+      (account) => account.currency === Currency.ARS,
+    );
+    if (loaded) return loaded;
 
     const existingAccount = await this.accountRepository.findOne({
-      where: { user: { id: user.id } } as any,
+      where: { user: { id: user.id }, currency: Currency.ARS },
       relations: ['user'],
     });
 
     if (existingAccount) {
-      user.account = existingAccount;
+      user.accounts = [...(user.accounts ?? []), existingAccount];
       return existingAccount;
     }
 
     const account = this.accountRepository.create({
-      accountNumber: null as unknown as string,
+      cbu: null as unknown as string,
       alias: null as unknown as string,
+      currency: Currency.ARS,
       balance: 150000,
       user,
     });
 
     const savedAccount = await this.accountRepository.save(account);
-    user.account = savedAccount;
+    user.accounts = [...(user.accounts ?? []), savedAccount];
     return savedAccount;
   }
 }

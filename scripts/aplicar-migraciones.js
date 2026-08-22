@@ -98,8 +98,34 @@ async function main() {
   `);
   const estado = previo.rows[0];
 
+  // Listar TODO lo que hay: mirar solo `accounts` hace reportar "base vacía"
+  // una base que en realidad tiene otro esquema conviviendo.
+  const CONOCIDAS = new Set([
+    'accounts', 'users', 'transactions', 'cards', 'card_authorizations', 'loans',
+    'loan_installments', 'utility_companies', 'utility_bills', 'topups',
+    'fixed_terms', 'cedear_orders', 'insurance_products', 'insurance_policies',
+    'insurance_claims', 'chat_messages', 'chat_escalations',
+  ]);
+
+  const todas = await client.query(`
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = 'public' ORDER BY table_name
+  `);
+  const ajenas = todas.rows.map((r) => r.table_name).filter((t) => !CONOCIDAS.has(t));
+
+  if (todas.rows.length === 0) {
+    console.log('La base está vacía: no hay ninguna tabla.\n');
+  } else if (ajenas.length) {
+    console.log(`⚠ Hay ${ajenas.length} tabla(s) que no son de este backend:`);
+    for (const t of ajenas) {
+      const n = await client.query(`SELECT count(*)::int n FROM "${t}"`);
+      console.log(`    ${t.padEnd(24)} ${String(n.rows[0].n).padStart(6)} filas`);
+    }
+    console.log('  No se tocan. Si son de otro proyecto, revisá que compartir base sea intencional.\n');
+  }
+
   console.log('Estado actual:');
-  console.log(`  tabla accounts .......... ${estado.tiene_accounts ? 'sí' : 'no (base vacía)'}`);
+  console.log(`  tabla accounts .......... ${estado.tiene_accounts ? 'sí' : 'no'}`);
   if (estado.tiene_accounts) {
     console.log(`  columna accountNumber ... ${estado.tiene_accountnumber ? 'sí (se va a renombrar)' : 'no'}`);
     console.log(`  columna cbu ............. ${estado.tiene_cbu ? 'sí (ya migrada)' : 'no'}`);

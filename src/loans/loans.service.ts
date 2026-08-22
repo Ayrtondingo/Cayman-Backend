@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -37,8 +38,17 @@ const round2 = (value: number) => Math.round(value * 100) / 100;
  */
 const MAX_SITUACION_ACEPTADA = Number(process.env.LOAN_MAX_SITUACION ?? 2);
 
+/**
+ * Nombre con el que este banco figura en la central de deudores. El Banco
+ * Central lo asigna solo, a partir de la API key: sirve para distinguir
+ * nuestras propias deudas de las de otras entidades.
+ */
+const BANK_NAME = process.env.BANK_NAME || 'Cayman-Shadow-Bank';
+
 @Injectable()
 export class LoansService {
+  private readonly logger = new Logger(LoansService.name);
+
   constructor(
     @InjectRepository(Loan)
     private readonly loanRepository: Repository<Loan>,
@@ -177,6 +187,9 @@ export class LoansService {
       return saved;
     });
 
+    // El capital adeudado al otorgar es el monto completo.
+    await this.informarDeuda(user.dni, simulation.monto);
+
     return this.findOne(clerkId, loan.id);
   }
 
@@ -188,19 +201,65 @@ export class LoansService {
   private async assertCreditworthy(dni: string | null) {
     if (!dni) return;
 
-    let situacion: number | null = null;
+    let report: Awaited<ReturnType<CentralBankService['getCreditSituation']>> = null;
 
     try {
-      const report = await this.centralBankService.getCreditSituation(dni);
-      situacion = report?.situacion ?? null;
+      report = await this.centralBankService.getCreditSituation(dni);
     } catch {
-      // El Banco Central no contesta: se sigue sin el chequeo.
+      // El Banco Central no contesta: se sigue sin el chequeo. Un problema de
+      // conectividad no puede dejar al banco sin poder operar.
       return;
     }
 
-    if (situacion !== null && situacion > MAX_SITUACION_ACEPTADA) {
+    // No figurar en la central no es lo mismo que estar mal calificado.
+    if (!report) return;
+
+    if (report.situacion > MAX_SITUACION_ACEPTADA) {
       throw new ForbiddenException(
-        `Situacion crediticia ${situacion}: no se puede otorgar el prestamo`,
+        `Situacion crediticia ${report.situacion}: no se puede otorgar el prestamo`,
+      );
+    }
+
+    // Un titular no puede tener prestamos en dos bancos a la vez. Las deudas
+    // que informa este banco no cuentan: esas son nuestras y ya las conocemos.
+    const enOtrosBancos = (report.deudas ?? []).filter(
+      (deuda) => deuda.entidad !== BANK_NAME && Number(deuda.monto) > 0,
+    );
+
+    if (enOtrosBancos.length > 0) {
+      const detalle = enOtrosBancos
+        .map((deuda) => `${deuda.entidad} (${deuda.monto})`)
+        .join(', ');
+
+      throw new ForbiddenException(
+        `El titular ya tiene deuda informada en otra entidad: ${detalle}. ` +
+          'Tiene que cancelarla antes de tomar un prestamo con nosotros.',
+      );
+    }
+  }
+
+  /**
+   * Informa al Banco Central lo que el titular le debe a este banco.
+   *
+   * Es la contraparte de `assertCreditworthy`: si no informaramos, los demas
+   * bancos no podrian aplicar la misma regla y el mecanismo funcionaria en un
+   * solo sentido. Un fallo al informar no revierte el prestamo, que ya esta
+   * acreditado: se registra y sigue.
+   */
+  private async informarDeuda(dni: string | null, capitalAdeudado: number) {
+    if (!dni) return;
+
+    try {
+      await this.centralBankService.reportDebt(
+        dni,
+        round2(capitalAdeudado),
+        // Un prestamo al dia es situacion 1. El seguimiento de la mora queda
+        // fuera de alcance por ahora.
+        1,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `No se pudo informar la deuda de ${dni} al Banco Central: ${(error as Error).message}`,
       );
     }
   }
@@ -304,6 +363,13 @@ export class LoansService {
       }
     });
 
+    // La deuda informada baja al capital que queda: si no, el titular figura
+    // debiendo el monto original para siempre y ningun banco le presta mas.
+    await this.informarDeuda(
+      (await this.userRepository.findOne({ where: { id: clerkId } }))?.dni ?? null,
+      Number(next.remainingPrincipal),
+    );
+
     return {
       numero: next.number,
       capital: Number(next.principal),
@@ -388,6 +454,13 @@ export class LoansService {
       loan.status = LoanStatus.CANCELADO;
       await manager.save(Loan, loan);
     });
+
+    // Prestamo cancelado: se informa deuda cero para que el titular quede
+    // libre en la central y pueda volver a pedir.
+    await this.informarDeuda(
+      (await this.userRepository.findOne({ where: { id: clerkId } }))?.dni ?? null,
+      0,
+    );
 
     return {
       ...(await this.toPublicLoan(loan)),

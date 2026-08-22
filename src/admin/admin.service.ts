@@ -1,10 +1,17 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
+import {
+  Transaction,
+  TransactionCategory,
+  TransactionStatus,
+  TransactionType,
+} from '../transactions/entities/transaction.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
 import { UsersService } from '../users/users.service';
@@ -23,6 +30,7 @@ export class AdminService {
     @InjectRepository(Account)
     private readonly accountRepository: Repository<Account>,
     private readonly usersService: UsersService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async getAllUsers() {
@@ -50,19 +58,67 @@ export class AdminService {
     });
   }
 
+  /**
+   * Ajuste manual de saldo. Solo el gerente.
+   *
+   * Deja un movimiento en la cuenta con quien lo hizo: un banco no puede tener
+   * plata que aparece sin rastro. Las dos cosas van en una transaccion de base,
+   * para que no quede saldo cambiado sin el movimiento que lo explica.
+   */
   async adjustBalance(
+    requesterId: string,
     targetUserId: string,
     amount: number,
     currency: Currency = Currency.ARS,
+    motivo?: string,
   ) {
+    if (!Number.isFinite(amount) || amount === 0) {
+      throw new BadRequestException('El importe del ajuste no puede ser cero');
+    }
+
+    const requester = await this.userRepository.findOne({ where: { id: requesterId } });
+    if (!requester || requester.role !== UserRole.GERENTE) {
+      throw new ForbiddenException('Solo el gerente puede ajustar saldos');
+    }
+
     const account = await this.accountRepository.findOne({
       where: { user: { id: targetUserId }, currency },
+      relations: ['user'],
     });
     if (!account) throw new NotFoundException('Usuario o cuenta no encontrada');
 
-    account.balance = Number(account.balance) + amount;
-    await this.accountRepository.save(account);
-    return { balance: Number(account.balance), currency: account.currency };
+    const saldoPrevio = Number(account.balance);
+
+    if (saldoPrevio + amount < 0) {
+      throw new BadRequestException(
+        `El ajuste dejaria la cuenta en negativo (saldo actual ${saldoPrevio})`,
+      );
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      account.balance = Math.round((saldoPrevio + amount) * 100) / 100;
+      await manager.save(Account, account);
+
+      await manager.save(
+        manager.create(Transaction, {
+          amount,
+          type: amount > 0 ? TransactionType.DEPOSIT : TransactionType.WITHDRAWAL,
+          category: TransactionCategory.OTROS,
+          description:
+            `Ajuste manual de ${requester.fullName}` + (motivo ? `: ${motivo}` : ''),
+          status: TransactionStatus.LOCAL,
+          account,
+        }),
+      );
+    });
+
+    return {
+      cliente: account.user?.fullName,
+      moneda: account.currency,
+      saldoPrevio,
+      ajuste: amount,
+      balance: Number(account.balance),
+    };
   }
 
   async changeRole(

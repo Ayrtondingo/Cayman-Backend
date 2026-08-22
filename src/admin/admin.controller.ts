@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,6 +9,7 @@ import {
   UseGuards,
   Req,
 } from '@nestjs/common';
+import { Currency } from '../common/enums/currency.enum';
 import { CreatePersonDto } from '../central-bank/dto/create-person.dto';
 import { AdminService } from './admin.service';
 import { ClerkAuthGuard } from '../auth/clerk.guard';
@@ -26,10 +28,27 @@ export class AdminController {
     return this.adminService.getAllUsers();
   }
 
+  /** Ajuste manual de saldo. Restringido al gerente. */
   @Patch('users/:id/balance')
-  @Roles(UserRole.ADMIN, UserRole.GERENTE)
-  adjustBalance(@Param('id') id: string, @Body('amount') amount: number) {
-    return this.adminService.adjustBalance(id, Number(amount));
+  @Roles(UserRole.GERENTE)
+  adjustBalance(
+    @Req() req,
+    @Param('id') id: string,
+    @Body() body: { amount: number; moneda?: string; motivo?: string },
+  ) {
+    const moneda = String(body.moneda ?? Currency.ARS).toUpperCase() as Currency;
+
+    if (!Object.values(Currency).includes(moneda)) {
+      throw new BadRequestException('Moneda no soportada');
+    }
+
+    return this.adminService.adjustBalance(
+      req.user.id,
+      id,
+      Number(body.amount),
+      moneda,
+      body.motivo,
+    );
   }
 
   @Patch('users/:id/role')

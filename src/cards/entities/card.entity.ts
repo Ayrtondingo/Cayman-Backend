@@ -32,6 +32,11 @@ export class Card {
   @Column({ unique: true })
   number: string;
 
+  // Codigo de seguridad de 3 digitos. Se genera al emitir y solo se muestra
+  // cuando el titular pide ver los datos completos.
+  @Column({ length: 3 })
+  cvv: string;
+
   // Solo en debito: la caja de ahorro de la que se descuentan los consumos.
   @Column({ nullable: true })
   cbuAsociado: string;

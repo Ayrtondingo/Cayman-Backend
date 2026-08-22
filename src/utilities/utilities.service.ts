@@ -9,6 +9,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { UtilityCompany } from './entities/utility-company.entity';
 import { BillStatus, UtilityBill } from './entities/utility-bill.entity';
+import { ServiceSubscription } from './entities/service-subscription.entity';
+import { User } from '../users/entities/user.entity';
 import { Account } from '../accounts/entities/account.entity';
 import { Currency } from '../common/enums/currency.enum';
 import {
@@ -41,6 +43,10 @@ export class UtilitiesService implements OnModuleInit {
     private readonly billRepository: Repository<UtilityBill>,
     @InjectRepository(Account)
     private readonly accountRepository: Repository<Account>,
+    @InjectRepository(ServiceSubscription)
+    private readonly subscriptionRepository: Repository<ServiceSubscription>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -262,6 +268,102 @@ export class UtilitiesService implements OnModuleInit {
       importe: Number(bill.importe),
       vencimiento: bill.vencimiento,
       estado: bill.status,
+    };
+  }
+
+  // ------------------------------------------------------ Servicios adheridos
+
+  /**
+   * Adhiere un servicio para que el cliente no tenga que recordar su numero
+   * ante la empresa. Si ya estaba adherido, actualiza el numero.
+   */
+  async subscribe(
+    clerkId: string,
+    companyId: number,
+    data: { numeroCliente: string; apodo?: string },
+  ) {
+    const company = await this.findCompany(companyId);
+    const user = await this.userRepository.findOne({ where: { id: clerkId } });
+    if (!user) throw new NotFoundException('Usuario no encontrado');
+
+    if (!data.numeroCliente?.trim()) {
+      throw new BadRequestException('Falta el numero de cliente');
+    }
+
+    const existente = await this.subscriptionRepository.findOne({
+      where: { user: { id: clerkId }, company: { id: company.id } },
+    });
+
+    const subscription =
+      existente ?? this.subscriptionRepository.create({ company, user });
+
+    subscription.numeroCliente = data.numeroCliente.trim();
+    subscription.apodo = data.apodo?.trim() || null;
+
+    await this.subscriptionRepository.save(subscription);
+    return this.toPublicSubscription(subscription);
+  }
+
+  async unsubscribe(clerkId: string, subscriptionId: number) {
+    const { affected } = await this.subscriptionRepository.delete({
+      id: subscriptionId,
+      user: { id: clerkId },
+    });
+
+    if (!affected) throw new NotFoundException('Adhesion no encontrada');
+    return { eliminado: true };
+  }
+
+  /**
+   * Servicios adheridos del cliente, cada uno con su deuda ya resuelta.
+   * Es la vista que reemplaza tener que tipear el numero de cliente.
+   */
+  async listSubscriptions(clerkId: string) {
+    const subscriptions = await this.subscriptionRepository.find({
+      where: { user: { id: clerkId } },
+      order: { createdAt: 'ASC' },
+    });
+
+    return Promise.all(
+      subscriptions.map(async (subscription) => {
+        const bills = await this.billRepository.find({
+          where: {
+            company: { id: subscription.company.id },
+            numeroCliente: subscription.numeroCliente,
+            status: BillStatus.PENDIENTE,
+          },
+          order: { vencimiento: 'ASC' },
+        });
+
+        const hoy = new Date();
+
+        return {
+          ...this.toPublicSubscription(subscription),
+          totalAdeudado: round2(
+            bills.reduce((sum, bill) => sum + Number(bill.importe), 0),
+          ),
+          cantidadFacturas: bills.length,
+          tieneVencidas: bills.some((bill) => new Date(bill.vencimiento) < hoy),
+          facturas: bills.map((bill) => ({
+            id: bill.id,
+            importe: Number(bill.importe),
+            vencimiento: bill.vencimiento,
+            estado: bill.status,
+            vencida: new Date(bill.vencimiento) < hoy,
+          })),
+        };
+      }),
+    );
+  }
+
+  private toPublicSubscription(subscription: ServiceSubscription) {
+    return {
+      id: subscription.id,
+      empresaId: subscription.company.id,
+      empresa: subscription.company.nombre,
+      rubro: subscription.company.rubro,
+      numeroCliente: subscription.numeroCliente,
+      apodo: subscription.apodo,
     };
   }
 }

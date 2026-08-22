@@ -43,6 +43,16 @@ export function generateCardNumber(): string {
   return body + String(luhnCheckDigit(body));
 }
 
+/** Codigo de seguridad de 3 digitos. */
+export function generateCvv(): string {
+  return String(randomInt(0, 1000)).padStart(3, '0');
+}
+
+/** Numero agrupado de a 4, para mostrarlo cuando el titular lo pide. */
+export function formatCardNumber(number: string): string {
+  return number.replace(/(\d{4})(?=\d)/g, '$1 ');
+}
+
 /** Lo unico que se expone hacia afuera: **** **** **** 1234 */
 export function maskCardNumber(number: string): string {
   return `**** **** **** ${number.slice(-4)}`;

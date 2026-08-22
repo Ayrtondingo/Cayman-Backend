@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseIntPipe,
@@ -23,6 +24,27 @@ export class UtilitiesController {
   @Get('empresas')
   listCompanies() {
     return this.utilitiesService.listCompanies();
+  }
+
+  /** Servicios adheridos del cliente, con la deuda de cada uno ya resuelta. */
+  @Get('adheridos')
+  listSubscriptions(@Request() req) {
+    return this.utilitiesService.listSubscriptions(this.clerkId(req));
+  }
+
+  /** Adherir un servicio para no tener que recordar el numero de cliente. */
+  @Post('empresas/:id/adherir')
+  subscribe(
+    @Request() req,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { numeroCliente: string; apodo?: string },
+  ) {
+    return this.utilitiesService.subscribe(this.clerkId(req), id, body);
+  }
+
+  @Delete('adheridos/:id')
+  unsubscribe(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.utilitiesService.unsubscribe(this.clerkId(req), id);
   }
 
   /** Deuda de un cliente con la empresa. El numeroCliente va por query. */

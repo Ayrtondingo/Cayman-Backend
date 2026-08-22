@@ -20,6 +20,8 @@ import {
 } from '../transactions/entities/transaction.entity';
 import {
   generateCardNumber,
+  generateCvv,
+  formatCardNumber,
   expirationDate,
   maskCardNumber,
 } from './card-number';
@@ -105,6 +107,7 @@ export class CardsService {
       this.cardRepository.create({
         type: tipo,
         number: generateCardNumber(),
+        cvv: generateCvv(),
         cbuAsociado: tipo === CardType.DEBITO ? data.cbuAsociado : null,
         limite: tipo === CardType.CREDITO ? Number(data.limite) : null,
         status: CardStatus.ACTIVA,
@@ -426,6 +429,32 @@ export class CardsService {
       limiteDisponible: round2(
         Number(card.limite) - (await this.consumedAmount(card.id)),
       ),
+    };
+  }
+
+  /**
+   * Datos completos de la tarjeta: numero sin enmascarar, vencimiento y CVV.
+   *
+   * Es lo que hace falta para pagar en un comercio online. Va en un endpoint
+   * aparte y no en el listado a proposito: el numero completo no tiene que
+   * viajar en cada carga de pantalla, solo cuando el titular lo pide.
+   * `ownedCard` garantiza que sea del cliente autenticado.
+   */
+  async reveal(clerkId: string, cardId: number) {
+    const card = await this.ownedCard(clerkId, cardId);
+
+    const vencimiento = new Date(`${card.expiresAt}T12:00:00`);
+
+    return {
+      id: card.id,
+      tipo: card.type,
+      numero: formatCardNumber(card.number),
+      numeroPlano: card.number,
+      cvv: card.cvv,
+      vencimiento: `${String(vencimiento.getMonth() + 1).padStart(2, '0')}/${String(
+        vencimiento.getFullYear(),
+      ).slice(-2)}`,
+      estado: card.status,
     };
   }
 }

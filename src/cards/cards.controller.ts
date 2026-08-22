@@ -60,6 +60,15 @@ export class CardsController {
     return this.cardsService.setBlock(this.clerkId(req), id, accion);
   }
 
+  /**
+   * Datos completos de la tarjeta, para pagar online.
+   * Endpoint aparte para que el numero no viaje en cada listado.
+   */
+  @Get('tarjetas/:id/datos')
+  reveal(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.cardsService.reveal(this.clerkId(req), id);
+  }
+
   /** Resumen mensual. Solo tiene sentido en credito. */
   @Get('tarjetas/:id/resumen')
   statement(@Request() req, @Param('id', ParseIntPipe) id: number) {

@@ -213,6 +213,23 @@ export class CentralBankService {
     );
   }
 
+  /**
+   * Moneda de un CBU cualquiera de la red.
+   *
+   * El Banco Central no expone la moneda en un solo lugar: las cajas en pesos
+   * viven en /persons y las demas en /accounts. Se prueban las dos.
+   *
+   * Hace falta porque POST /transactions no lleva campo de moneda y el Central
+   * aprueba transferencias entre monedas distintas sin chequear nada: sin esto,
+   * mandar 50 desde una caja en dolares acredita 50 pesos del otro lado.
+   */
+  async getCurrencyOfCbu(cbu: string): Promise<Currency | null> {
+    if (await this.getPersonByCbu(cbu)) return Currency.ARS;
+
+    const cuenta = await this.getAccountByCbu(cbu);
+    return cuenta ? ((cuenta.moneda as Currency) ?? Currency.ARS) : null;
+  }
+
   /** Idem para alias, que son unicos entre personas y cuentas. */
   async resolveAlias(
     alias: string,

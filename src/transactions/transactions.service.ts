@@ -90,6 +90,25 @@ export class TransactionsService {
       );
     }
 
+    // El Banco Central no valida que origen y destino sean de la misma moneda:
+    // aprueba mandar 50 desde una caja en dolares a una en pesos y acredita 50
+    // pesos del otro lado. Se valida de este lado antes de mandar nada.
+    const monedaDestino =
+      await this.centralBankService.getCurrencyOfCbu(receiverCbu);
+
+    if (!monedaDestino) {
+      throw new NotFoundException(
+        `El CBU ${receiverCbu} no existe en la red interbancaria`,
+      );
+    }
+
+    if (monedaDestino !== currency) {
+      throw new BadRequestException(
+        `No se puede transferir de una cuenta en ${currency} a una en ${monedaDestino}. ` +
+          `Convertí el dinero primero desde Cuentas.`,
+      );
+    }
+
     const centralTransaction =
       await this.centralBankService.registerTransaction({
         cbuOrigen: senderAccount.cbu,

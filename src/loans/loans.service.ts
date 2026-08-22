@@ -136,7 +136,7 @@ export class LoansService {
       );
     }
 
-    const veredicto = await this.evaluarCredito(user.dni);
+    const veredicto = await this.evaluarCredito(user);
     const simulation = await this.simulate(data);
     const tna = simulation.tna / 100;
 
@@ -239,11 +239,44 @@ export class LoansService {
    * ahora manda la solicitud a la cola del gerente, que decide con el informe
    * de la central a la vista.
    */
-  private async evaluarCredito(dni: string | null): Promise<{
+  private async evaluarCredito(user: User): Promise<{
     aprueba: boolean;
     motivo: string | null;
     informe: InformeCentral | null;
   }> {
+    // Primero lo propio: la central solo informa montos, no distingue un
+    // prestamo vigente de una deuda cualquiera, y una solicitud pendiente
+    // todavia no esta informada. Sin este chequeo un cliente podia pedir
+    // varios prestamos seguidos en este mismo banco.
+    const enRevision = await this.loanRepository.count({
+      where: { user: { id: user.id }, status: LoanStatus.PENDIENTE },
+    });
+
+    // Esta no va a revision: seria dejar que el cliente llene la cola del
+    // gerente pidiendo una y otra vez.
+    if (enRevision > 0) {
+      throw new BadRequestException(
+        'Ya tenes una solicitud en revision. Espera a que el banco la resuelva.',
+      );
+    }
+
+    const vigentes = await this.loanRepository.count({
+      where: { user: { id: user.id }, status: LoanStatus.VIGENTE },
+    });
+
+    if (vigentes > 0) {
+      return {
+        aprueba: false,
+        motivo:
+          vigentes === 1
+            ? 'Ya tiene un prestamo vigente en este banco'
+            : `Ya tiene ${vigentes} prestamos vigentes en este banco`,
+        informe: null,
+      };
+    }
+
+    const dni = user.dni;
+
     if (!dni) {
       return {
         aprueba: false,

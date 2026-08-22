@@ -21,7 +21,32 @@ En local se puede seguir usando la sincronización automática con
 Los dos son idempotentes en lo que puede repetirse y van dentro de una
 transacción: si algo falla, no queda a medias.
 
-## Cómo aplicarlos en Supabase
+## Cómo aplicarlos
+
+### Opción A: con el script (recomendado)
+
+Poné en el `.env` la cadena de conexión, que se saca de Supabase en
+**Connect → Transaction pooler**:
+
+```
+SUPABASE_DB_URL=postgresql://postgres.<ref>:<PASSWORD>@aws-1-<region>.pooler.supabase.com:6543/postgres
+```
+
+Y corré:
+
+```bash
+node scripts/aplicar-migraciones.js --dry-run   # diagnostica, no escribe
+node scripts/aplicar-migraciones.js             # aplica
+```
+
+El script aplica los scripts en orden, verifica el resultado y **nunca imprime
+la contraseña**. Es reejecutable: si un deploy queda a medias, se vuelve a
+correr sin problema.
+
+Usá el host del **pooler**, no `db.<ref>.supabase.co`: ese es IPv6-only y
+Render en plan free no tiene salida IPv6.
+
+### Opción B: a mano en Supabase
 
 1. Dashboard → **SQL Editor**.
 2. Pegar el contenido de `001`, **Run**. Revisar que la verificación del final

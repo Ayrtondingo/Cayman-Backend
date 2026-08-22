@@ -9,27 +9,74 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
+
+      # ------------------------------------------------------------ Base de datos
       - key: USE_DATABASE_URL
         value: true
+      - key: DATABASE_URL
+        sync: false
+
+      # -------------------------------------------------------------------- CORS
+      # Poner acá la URL de producción del frontend en Vercel, separadas por coma.
       - key: FRONTEND_URLS
         sync: false
       - key: ALLOW_VERCEL_PREVIEWS
         value: false
-      - key: DATABASE_URL
-        sync: false
+
+      # ------------------------------------------------------------------- Clerk
       - key: CLERK_SECRET_KEY
         sync: false
       - key: CLERK_PUBLISHABLE_KEY
         sync: false
+
+      # ----------------------------------------------------------- Banco Central
       - key: CENTRAL_BANK_API_KEY
         sync: false
       - key: CENTRAL_BANK_URL
         value: https://centralbank.brocoly.cc/api
       - key: CENTRAL_BANK_ENV
         value: test
+      # Comunicadas por la cátedra. Todavía no las lee ningún archivo de src/.
       - key: BANK_ID
         sync: false
       - key: BANK_CODE
         value: 19
       - key: BANK_NAME
         value: Cayman-Shadow-Bank
+
+      # ------------------------------------------------------------- Asistente IA
+      # Sin esta key, /api/chat/mensajes responde 503 y el resto del banco
+      # funciona igual.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CHAT_MODEL
+        value: claude-opus-5
+      # Acciones que el asistente puede ejecutar SIN confirmación del cliente.
+      # Vacío = ninguna. La cátedra todavía no definió esta política.
+      - key: CHAT_ACCIONES_AUTONOMAS
+        value: ""
+
+      # --------------------------------------------- Parámetros de negocio
+      # Todos tienen default en el código; se declaran acá para poder ajustarlos
+      # desde Render sin tocar el repo.
+      - key: CARD_TNA
+        value: 0.85
+      - key: CARD_PAGO_MINIMO_PCT
+        value: 0.1
+      # La cátedra asigna el rango de BIN por grupo; esto es un placeholder.
+      - key: CARD_BIN
+        value: 450019
+      # Peor situación crediticia aceptada para otorgar un préstamo (1 a 5).
+      - key: LOAN_MAX_SITUACION
+        value: 2
+      - key: FIXED_TERM_MIN
+        value: 1000
+      - key: FIXED_TERM_MIN_DAYS
+        value: 30
+      - key: TOPUP_MIN
+        value: 100
+      - key: TOPUP_MAX
+        value: 50000
+      # Casa de cambio de DolarAPI con la que el banco convierte ARS <-> USD.
+      - key: DOLAR_CASA
+        value: oficial

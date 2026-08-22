@@ -10,9 +10,12 @@ import {
 } from '@nestjs/common';
 import { LoansService } from './loans.service';
 import { ClerkAuthGuard } from '../auth/clerk.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
 
 @Controller('prestamos')
-@UseGuards(ClerkAuthGuard)
+@UseGuards(ClerkAuthGuard, RolesGuard)
 export class LoansController {
   constructor(private readonly loansService: LoansService) {}
 
@@ -33,6 +36,32 @@ export class LoansController {
   @Get()
   findMine(@Request() req) {
     return this.loansService.findAllByUser(this.clerkId(req));
+  }
+
+  // ------------------------------------------- Cola de aprobacion (gerente)
+  // Van antes de @Get(':id') para que "solicitudes" no se lea como un id.
+
+  /** Solicitudes que quedaron a revision, con el informe de la central. */
+  @Get('solicitudes/pendientes')
+  @Roles(UserRole.GERENTE)
+  listPending(@Request() req) {
+    return this.loansService.listPending(this.clerkId(req));
+  }
+
+  @Post('solicitudes/:id/aprobar')
+  @Roles(UserRole.GERENTE)
+  approve(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.loansService.approve(this.clerkId(req), id);
+  }
+
+  @Post('solicitudes/:id/rechazar')
+  @Roles(UserRole.GERENTE)
+  reject(
+    @Request() req,
+    @Param('id', ParseIntPipe) id: number,
+    @Body('motivo') motivo?: string,
+  ) {
+    return this.loansService.reject(this.clerkId(req), id, motivo);
   }
 
   @Get(':id')

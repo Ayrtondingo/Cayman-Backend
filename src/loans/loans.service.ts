@@ -7,13 +7,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { Loan, LoanStatus } from './entities/loan.entity';
+import { InformeCentral, Loan, LoanStatus } from './entities/loan.entity';
 import {
   InstallmentStatus,
   LoanInstallment,
 } from './entities/loan-installment.entity';
 import { Account } from '../accounts/entities/account.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { Currency } from '../common/enums/currency.enum';
 import {
   Transaction,
@@ -136,23 +136,63 @@ export class LoansService {
       );
     }
 
-    await this.assertCreditworthy(user.dni);
-
+    const veredicto = await this.evaluarCredito(user.dni);
     const simulation = await this.simulate(data);
     const tna = simulation.tna / 100;
 
-    const loan = await this.dataSource.transaction(async (manager) => {
-      const saved = await manager.save(
+    // Si algo no cierra, la solicitud no se rechaza: queda esperando al
+    // gerente, con la foto de la central adjunta para que pueda decidir.
+    if (!veredicto.aprueba) {
+      const pendiente = await this.loanRepository.save(
+        this.loanRepository.create({
+          amount: simulation.monto,
+          termMonths: simulation.plazoMeses,
+          tna,
+          installmentAmount: simulation.cuota,
+          status: LoanStatus.PENDIENTE,
+          cbu: account.cbu,
+          motivoRevision: veredicto.motivo,
+          informeCentral: veredicto.informe,
+          user,
+        }),
+      );
+
+      // Las cuotas se generan recien al aprobar: si se crearan ahora, los
+      // vencimientos quedarian contados desde la solicitud y no desde el alta.
+      return this.toPublicLoan(pendiente);
+    }
+
+    const loan = await this.otorgar(user, account, simulation, tna);
+    await this.informarDeuda(user.dni, simulation.monto);
+
+    return this.findOne(clerkId, loan.id);
+  }
+
+  /**
+   * Acredita el capital, crea la tabla de cuotas y deja el prestamo vigente.
+   * Se usa tanto en el alta directa como cuando el gerente aprueba.
+   */
+  private async otorgar(
+    user: User,
+    account: Account,
+    simulation: Awaited<ReturnType<LoansService['simulate']>>,
+    tna: number,
+    existente?: Loan,
+  ): Promise<Loan> {
+    return this.dataSource.transaction(async (manager) => {
+      const loan =
+        existente ??
         manager.create(Loan, {
           amount: simulation.monto,
           termMonths: simulation.plazoMeses,
           tna,
           installmentAmount: simulation.cuota,
-          status: LoanStatus.VIGENTE,
           cbu: account.cbu,
           user,
-        }),
-      );
+        });
+
+      loan.status = LoanStatus.VIGENTE;
+      const saved = await manager.save(Loan, loan);
 
       await manager.save(
         simulation.tabla.map((row) =>
@@ -169,7 +209,6 @@ export class LoansService {
         ),
       );
 
-      // Acreditacion del capital en la caja del cliente.
       account.balance = round2(Number(account.balance) + simulation.monto);
       await manager.save(Account, account);
 
@@ -186,11 +225,6 @@ export class LoansService {
 
       return saved;
     });
-
-    // El capital adeudado al otorgar es el monto completo.
-    await this.informarDeuda(user.dni, simulation.monto);
-
-    return this.findOne(clerkId, loan.id);
   }
 
   /**
@@ -198,44 +232,178 @@ export class LoansService {
    * Un fallo de la API del Banco Central no debe bloquear el prestamo, pero
    * una situacion 3+ confirmada si.
    */
-  private async assertCreditworthy(dni: string | null) {
-    if (!dni) return;
+  /**
+   * Evalua si el titular puede tomar un prestamo directo.
+   *
+   * No tira excepcion: devuelve un veredicto. Lo que antes era un rechazo
+   * ahora manda la solicitud a la cola del gerente, que decide con el informe
+   * de la central a la vista.
+   */
+  private async evaluarCredito(dni: string | null): Promise<{
+    aprueba: boolean;
+    motivo: string | null;
+    informe: InformeCentral | null;
+  }> {
+    if (!dni) {
+      return {
+        aprueba: false,
+        motivo: 'El titular no tiene DNI cargado: no se pudo consultar la central',
+        informe: null,
+      };
+    }
 
     let report: Awaited<ReturnType<CentralBankService['getCreditSituation']>> = null;
 
     try {
       report = await this.centralBankService.getCreditSituation(dni);
-    } catch {
-      // El Banco Central no contesta: se sigue sin el chequeo. Un problema de
-      // conectividad no puede dejar al banco sin poder operar.
-      return;
+    } catch (error) {
+      // El Banco Central no contesta. No se aprueba solo, pero tampoco se
+      // rechaza: lo mira el gerente.
+      this.logger.warn(
+        `No se pudo consultar la central para ${dni}: ${(error as Error).message}`,
+      );
+      return {
+        aprueba: false,
+        motivo: 'No se pudo consultar la central de deudores',
+        informe: null,
+      };
     }
 
     // No figurar en la central no es lo mismo que estar mal calificado.
-    if (!report) return;
+    if (!report) return { aprueba: true, motivo: null, informe: null };
+
+    const informe: InformeCentral = {
+      situacion: report.situacion,
+      deudas: (report.deudas ?? []).map((d) => ({
+        entidad: d.entidad,
+        monto: Number(d.monto),
+        situacion: d.situacion,
+      })),
+    };
 
     if (report.situacion > MAX_SITUACION_ACEPTADA) {
-      throw new ForbiddenException(
-        `Situacion crediticia ${report.situacion}: no se puede otorgar el prestamo`,
-      );
+      return {
+        aprueba: false,
+        motivo: `Situacion crediticia ${report.situacion} (el maximo aceptado es ${MAX_SITUACION_ACEPTADA})`,
+        informe,
+      };
     }
 
     // Un titular no puede tener prestamos en dos bancos a la vez. Las deudas
     // que informa este banco no cuentan: esas son nuestras y ya las conocemos.
-    const enOtrosBancos = (report.deudas ?? []).filter(
-      (deuda) => deuda.entidad !== BANK_NAME && Number(deuda.monto) > 0,
+    const ajenas = informe.deudas.filter(
+      (deuda) => deuda.entidad !== BANK_NAME && deuda.monto > 0,
     );
 
-    if (enOtrosBancos.length > 0) {
-      const detalle = enOtrosBancos
-        .map((deuda) => `${deuda.entidad} (${deuda.monto})`)
-        .join(', ');
-
-      throw new ForbiddenException(
-        `El titular ya tiene deuda informada en otra entidad: ${detalle}. ` +
-          'Tiene que cancelarla antes de tomar un prestamo con nosotros.',
-      );
+    if (ajenas.length > 0) {
+      return {
+        aprueba: false,
+        motivo: `Deuda informada en otra entidad: ${ajenas
+          .map((d) => `${d.entidad} (${d.monto})`)
+          .join(', ')}`,
+        informe,
+      };
     }
+
+    return { aprueba: true, motivo: null, informe };
+  }
+
+  // ------------------------------------------------- Aprobacion del gerente
+
+  private async assertGerente(requesterId: string): Promise<User> {
+    const requester = await this.userRepository.findOne({
+      where: { id: requesterId },
+    });
+
+    if (!requester || requester.role !== UserRole.GERENTE) {
+      throw new ForbiddenException('Solo el gerente puede resolver solicitudes');
+    }
+
+    return requester;
+  }
+
+  /** Solicitudes esperando resolucion, de la mas vieja a la mas nueva. */
+  async listPending(requesterId: string) {
+    await this.assertGerente(requesterId);
+
+    const pendientes = await this.loanRepository.find({
+      where: { status: LoanStatus.PENDIENTE },
+      relations: ['user'],
+      order: { createdAt: 'ASC' },
+    });
+
+    return pendientes.map((loan) => ({
+      id: loan.id,
+      monto: Number(loan.amount),
+      plazoMeses: loan.termMonths,
+      tna: round2(Number(loan.tna) * 100),
+      cuota: Number(loan.installmentAmount),
+      fechaSolicitud: loan.createdAt,
+      motivoRevision: loan.motivoRevision,
+      informeCentral: loan.informeCentral,
+      cliente: {
+        id: loan.user?.id,
+        nombre: loan.user?.fullName,
+        email: loan.user?.email,
+        dni: loan.user?.dni,
+      },
+    }));
+  }
+
+  /** El gerente aprueba: recien ahi se acredita la plata y se informa la deuda. */
+  async approve(requesterId: string, loanId: number) {
+    const gerente = await this.assertGerente(requesterId);
+
+    const loan = await this.loanRepository.findOne({
+      where: { id: loanId },
+      relations: ['user'],
+    });
+
+    if (!loan) throw new NotFoundException('Solicitud no encontrada');
+    if (loan.status !== LoanStatus.PENDIENTE) {
+      throw new BadRequestException(`La solicitud ya esta ${loan.status}`);
+    }
+
+    const account = await this.accountRepository.findOne({
+      where: { cbu: loan.cbu },
+    });
+    if (!account) throw new NotFoundException('La cuenta del prestamo ya no existe');
+
+    // Se recalcula la tabla al aprobar, para que los vencimientos cuenten
+    // desde el alta y no desde la solicitud.
+    const simulation = await this.simulate({
+      monto: Number(loan.amount),
+      plazoMeses: loan.termMonths,
+      tna: Number(loan.tna),
+    });
+
+    loan.resueltoPor = gerente.fullName;
+    loan.resueltoEl = new Date();
+
+    await this.otorgar(loan.user, account, simulation, Number(loan.tna), loan);
+    await this.informarDeuda(loan.user?.dni ?? null, Number(loan.amount));
+
+    return this.toPublicLoan(
+      (await this.loanRepository.findOne({ where: { id: loan.id } }))!,
+    );
+  }
+
+  async reject(requesterId: string, loanId: number, motivo?: string) {
+    const gerente = await this.assertGerente(requesterId);
+
+    const loan = await this.loanRepository.findOne({ where: { id: loanId } });
+    if (!loan) throw new NotFoundException('Solicitud no encontrada');
+    if (loan.status !== LoanStatus.PENDIENTE) {
+      throw new BadRequestException(`La solicitud ya esta ${loan.status}`);
+    }
+
+    loan.status = LoanStatus.RECHAZADO;
+    loan.resueltoPor = gerente.fullName;
+    loan.resueltoEl = new Date();
+    loan.motivoRechazo = motivo?.trim() || 'No cumple los requisitos crediticios';
+
+    await this.loanRepository.save(loan);
+    return this.toPublicLoan(loan);
   }
 
   /**
@@ -488,6 +656,10 @@ export class LoansService {
       estado: loan.status,
       cbu: loan.cbu,
       fechaAlta: loan.createdAt,
+      motivoRevision: loan.motivoRevision,
+      motivoRechazo: loan.motivoRechazo,
+      resueltoPor: loan.resueltoPor,
+      resueltoEl: loan.resueltoEl,
       cuotasPagadas: installments.length - pending.length,
       capitalAdeudado: round2(
         pending.reduce(

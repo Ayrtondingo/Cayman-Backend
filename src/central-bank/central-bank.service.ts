@@ -8,6 +8,9 @@ export interface CentralBankPerson {
   apellido: string;
   dni?: string;
   alias?: string;
+  bankCode?: number;
+  /** Solo viene cuando la caja no es en pesos. Ver getCurrencyOfCbu. */
+  moneda?: Currency;
 }
 
 export interface CentralBankAccount {
@@ -163,7 +166,7 @@ export class CentralBankService {
     }
   }
 
-  /** GET /accounts/{cbu}. Solo encuentra cuentas en monedas distintas de ARS. */
+  /** GET /accounts/{cbu}. Sirve cualquier caja e informa siempre la moneda. */
   async getAccountByCbu(cbu: string): Promise<CentralBankAccount | null> {
     try {
       const response = await axios.get(`${this.apiUrl}/accounts/${cbu}`, {
@@ -216,18 +219,23 @@ export class CentralBankService {
   /**
    * Moneda de un CBU cualquiera de la red.
    *
-   * El Banco Central no expone la moneda en un solo lugar: las cajas en pesos
-   * viven en /persons y las demas en /accounts. Se prueban las dos.
-   *
    * Hace falta porque POST /transactions no lleva campo de moneda y el Central
    * aprueba transferencias entre monedas distintas sin chequear nada: sin esto,
    * mandar 50 desde una caja en dolares acredita 50 pesos del otro lado.
+   *
+   * Se pregunta primero a /accounts/{cbu}, que es el unico que informa la
+   * moneda de todas las cajas, la de pesos incluida. /persons/{cbu} solo trae
+   * el campo cuando NO es ARS, asi que ahi la ausencia significa pesos.
    */
   async getCurrencyOfCbu(cbu: string): Promise<Currency | null> {
-    if (await this.getPersonByCbu(cbu)) return Currency.ARS;
-
     const cuenta = await this.getAccountByCbu(cbu);
-    return cuenta ? ((cuenta.moneda as Currency) ?? Currency.ARS) : null;
+    if (cuenta?.moneda) return cuenta.moneda;
+
+    const persona = await this.getPersonByCbu(cbu);
+    if (persona) return persona.moneda ?? Currency.ARS;
+
+    // Existe pero no dijo la moneda: es una caja en pesos.
+    return cuenta ? Currency.ARS : null;
   }
 
   /** Idem para alias, que son unicos entre personas y cuentas. */

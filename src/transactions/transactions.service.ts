@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -14,16 +15,24 @@ import {
 import { Account } from '../accounts/entities/account.entity';
 import { Currency } from '../common/enums/currency.enum';
 import { CentralBankService } from '../central-bank/central-bank.service';
+import { TransferContact } from './entities/contact.entity';
+import { User } from '../users/entities/user.entity';
 
 const CBU_REGEX = /^\d{22}$/;
 
 @Injectable()
 export class TransactionsService {
+  private readonly logger = new Logger(TransactionsService.name);
+
   constructor(
     @InjectRepository(Transaction)
     private readonly transactionRepository: Repository<Transaction>,
     @InjectRepository(Account)
     private readonly accountRepository: Repository<Account>,
+    @InjectRepository(TransferContact)
+    private readonly contactRepository: Repository<TransferContact>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     private readonly centralBankService: CentralBankService,
   ) {}
 
@@ -160,10 +169,16 @@ export class TransactionsService {
       status: TransactionStatus.APPROVED,
     });
 
-    return this.toFrontendTransaction(
-      await this.transactionRepository.save(transaction),
-      senderAccount.cbu,
-    );
+    const guardada = await this.transactionRepository.save(transaction);
+
+    // La agenda se arma sola con cada transferencia completada.
+    await this.recordarContacto(clerkId, {
+      cbu: receiverCbu,
+      nombre: counterpartyName ?? null,
+      currency,
+    });
+
+    return this.toFrontendTransaction(guardada, senderAccount.cbu);
   }
 
   async getCombinedHistory(clerkId: string, currency: Currency = Currency.ARS) {
@@ -261,5 +276,106 @@ export class TransactionsService {
       status: transaction.status,
       ownCbu,
     };
+  }
+
+  // ------------------------------------------------------------- Contactos
+
+  /**
+   * Suma o actualiza un destinatario en la agenda.
+   *
+   * Nunca hace fallar la transferencia: la plata ya se movio y no tiene sentido
+   * romper por no poder guardar un contacto.
+   */
+  private async recordarContacto(
+    clerkId: string,
+    datos: { cbu: string; nombre: string | null; currency: Currency },
+  ) {
+    try {
+      const user = await this.userRepository.findOne({ where: { id: clerkId } });
+      if (!user) return;
+
+      const existente = await this.contactRepository.findOne({
+        where: { user: { id: clerkId }, cbu: datos.cbu },
+      });
+
+      const contacto =
+        existente ??
+        this.contactRepository.create({
+          cbu: datos.cbu,
+          currency: datos.currency,
+          vecesUsado: 0,
+          user,
+        });
+
+      // El alias y el banco se piden al Central: el alias puede haber cambiado
+      // desde la ultima vez, y el bankCode permite mostrar de que banco es.
+      const destino = await this.centralBankService.resolveCbu(datos.cbu);
+
+      if (destino) {
+        contacto.alias = destino.alias ?? contacto.alias ?? null;
+        contacto.nombre =
+          datos.nombre ??
+          (destino.nombre
+            ? `${destino.nombre} ${destino.apellido ?? ''}`.trim()
+            : contacto.nombre) ??
+          null;
+        const bankCode = (destino as { bankCode?: number }).bankCode;
+        if (typeof bankCode === 'number') contacto.bankCode = bankCode;
+      } else if (datos.nombre) {
+        contacto.nombre = datos.nombre;
+      }
+
+      contacto.vecesUsado += 1;
+      contacto.ultimoUso = new Date();
+
+      await this.contactRepository.save(contacto);
+    } catch (error) {
+      this.logger.warn(`No se pudo guardar el contacto: ${(error as Error).message}`);
+    }
+  }
+
+  /** Agenda del cliente, de la mas usada recientemente a la mas vieja. */
+  async listContacts(clerkId: string) {
+    const contactos = await this.contactRepository.find({
+      where: { user: { id: clerkId } },
+      order: { ultimoUso: 'DESC' },
+      take: 50,
+    });
+
+    return contactos.map((contacto) => ({
+      id: contacto.id,
+      cbu: contacto.cbu,
+      alias: contacto.alias,
+      // El apodo que puso el cliente le gana al nombre del Banco Central.
+      nombre: contacto.apodo ?? contacto.nombre ?? null,
+      nombreTitular: contacto.nombre,
+      apodo: contacto.apodo,
+      bankCode: contacto.bankCode,
+      moneda: contacto.currency,
+      vecesUsado: contacto.vecesUsado,
+      ultimoUso: contacto.ultimoUso,
+    }));
+  }
+
+  private async ownedContact(clerkId: string, id: number) {
+    const contacto = await this.contactRepository.findOne({
+      where: { id, user: { id: clerkId } },
+    });
+
+    if (!contacto) throw new NotFoundException('Contacto no encontrado');
+    return contacto;
+  }
+
+  async renameContact(clerkId: string, id: number, apodo: string) {
+    const contacto = await this.ownedContact(clerkId, id);
+    contacto.apodo = apodo?.trim() || null;
+    await this.contactRepository.save(contacto);
+    return { id: contacto.id, apodo: contacto.apodo };
+  }
+
+  async deleteContact(clerkId: string, id: number) {
+    const contacto = await this.ownedContact(clerkId, id);
+    await this.contactRepository.remove(contacto);
+    return { eliminado: true };
   }
 }

@@ -2,8 +2,11 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   Param,
+  ParseIntPipe,
+  Patch,
   Post,
   Request,
   UseGuards,
@@ -66,6 +69,29 @@ export class TransactionsController {
     }
 
     return this.transactionsService.getCombinedHistory(req.user.id, currency);
+  }
+
+  // --------------------------------------------------------- Agenda
+  // Van antes de history/:moneda para que "contactos" no se lea como moneda.
+
+  /** Destinatarios a los que ya se transfirio. Se llena sola. */
+  @Get('contactos')
+  listContacts(@Request() req) {
+    return this.transactionsService.listContacts(req.user.id);
+  }
+
+  @Patch('contactos/:id')
+  renameContact(
+    @Request() req,
+    @Param('id', ParseIntPipe) id: number,
+    @Body('apodo') apodo: string,
+  ) {
+    return this.transactionsService.renameContact(req.user.id, id, apodo);
+  }
+
+  @Delete('contactos/:id')
+  deleteContact(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    return this.transactionsService.deleteContact(req.user.id, id);
   }
 
   @Get('history')

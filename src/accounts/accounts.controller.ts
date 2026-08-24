@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Put,
   Request,
   UseGuards,
 } from '@nestjs/common';
@@ -47,6 +48,16 @@ export class AccountsController {
   // proposito. Acreditar o debitar una cuenta lo hace el gerente desde
   // PATCH /admin/users/:id/balance, que ademas registra quien lo hizo.
   // El cliente mueve plata por transferencia, cambio de divisas o pagos.
+
+  /** Asigna o cambia el alias de una caja. Elige el endpoint del Central segun la moneda. */
+  @Put(':cbu/alias')
+  async updateAlias(
+    @Request() req,
+    @Param('cbu') cbu: string,
+    @Body('alias') alias: string,
+  ) {
+    return this.accountsService.updateAlias(this.clerkId(req), cbu, alias);
+  }
 
   @Get(':cbu/movimientos')
   async getMovements(@Request() req, @Param('cbu') cbu: string) {

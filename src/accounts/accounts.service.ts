@@ -390,4 +390,44 @@ export class AccountsService {
       saldo,
     };
   }
+
+  /**
+   * Asigna o cambia el alias de una caja de ahorro.
+   *
+   * El Banco Central expone los alias en dos endpoints distintos segun el tipo
+   * de cuenta: la caja en pesos vive en /persons y las demas en /accounts.
+   * Por eso las cajas en dolares se quedaban sin alias: `POST /accounts` no lo
+   * acepta en el body y nadie llamaba despues al endpoint que corresponde.
+   */
+  async updateAlias(clerkId: string, cbu: string, alias: string) {
+    const limpio = String(alias ?? '').trim();
+
+    // El Banco Central exige alias unicos a nivel global y con este formato.
+    if (!/^[A-Za-z0-9.-]{6,20}$/.test(limpio)) {
+      throw new BadRequestException(
+        'El alias debe tener entre 6 y 20 caracteres, y solo letras, numeros, puntos o guiones',
+      );
+    }
+
+    const account = await this.ownedAccount(clerkId, cbu);
+
+    if (!account.cbu) {
+      throw new BadRequestException('La cuenta todavia no tiene CBU');
+    }
+
+    if (account.currency === Currency.ARS) {
+      await this.centralBankService.updateAlias(account.cbu, limpio);
+    } else {
+      await this.centralBankService.updateAccountAlias(account.cbu, limpio);
+    }
+
+    account.alias = limpio;
+    await this.accountRepository.save(account);
+
+    return {
+      cbu: account.cbu,
+      moneda: account.currency,
+      alias: account.alias,
+    };
+  }
 }

@@ -72,7 +72,6 @@ export class TransactionsController {
   }
 
   // --------------------------------------------------------- Agenda
-  // Van antes de history/:moneda para que "contactos" no se lea como moneda.
 
   /** Destinatarios a los que ya se transfirio. Se llena sola. */
   @Get('contactos')

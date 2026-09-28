@@ -51,10 +51,16 @@ services:
       # ------------------------------------------------------------- Asistente IA
       # Sin esta key, /api/chat/mensajes responde 503 y el resto del banco
       # funciona igual.
+      # Proveedor del modelo: anthropic o gemini (Gemini tiene plan gratuito).
+      - key: CHAT_PROVIDER
+        value: gemini
       - key: ANTHROPIC_API_KEY
         sync: false
-      - key: CHAT_MODEL
-        value: claude-opus-5
+      - key: GEMINI_API_KEY
+        sync: false
+      # CHAT_MODEL es opcional: sin definirla se usa el modelo por defecto de
+      # cada proveedor. Con gemini acepta una lista separada por comas que se
+      # prueba en orden si un modelo esta saturado.
       # Acciones que el asistente puede ejecutar SIN confirmación del cliente.
       # Vacío = ninguna. La cátedra todavía no definió esta política.
       - key: CHAT_ACCIONES_AUTONOMAS

@@ -7,7 +7,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import Anthropic from '@anthropic-ai/sdk';
 import { ChatMessage, ChatRole } from './entities/chat-message.entity';
 import { Escalation, EscalationStatus } from './entities/escalation.entity';
 import { User } from '../users/entities/user.entity';
@@ -17,8 +16,12 @@ import { LoansService } from '../loans/loans.service';
 import { ReportsService } from '../reports/reports.service';
 import { DolarService } from '../market/dolar.service';
 import { CHAT_TOOLS, CHAT_TOOL_BY_NAME } from './chat.tools';
-
-const MODEL = process.env.CHAT_MODEL || 'claude-opus-5';
+import {
+  Conversacion,
+  crearProveedorChat,
+  esSaturacion,
+  ResultadoHerramienta,
+} from './chat.providers';
 
 /**
  * Acciones que cambian estado y que el asistente PUEDE ejecutar sin confirmacion.
@@ -70,9 +73,7 @@ export interface AccionPendiente {
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
 
-  private readonly client = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  });
+  private readonly proveedor = crearProveedorChat();
 
   constructor(
     @InjectRepository(ChatMessage)
@@ -87,10 +88,6 @@ export class ChatService {
     private readonly reportsService: ReportsService,
     private readonly dolarService: DolarService,
   ) {}
-
-  private get configured(): boolean {
-    return Boolean(process.env.ANTHROPIC_API_KEY);
-  }
 
   /**
    * Ejecuta una herramienta contra los servicios del banco.
@@ -152,9 +149,9 @@ export class ChatService {
       throw new BadRequestException('El mensaje no puede estar vacio');
     }
 
-    if (!this.configured) {
+    if (!this.proveedor.configurado) {
       throw new HttpException(
-        'El asistente no esta configurado: falta ANTHROPIC_API_KEY',
+        `El asistente no esta configurado: falta ${this.proveedor.variableKey}`,
         HttpStatus.SERVICE_UNAVAILABLE,
       );
     }
@@ -168,17 +165,15 @@ export class ChatService {
       take: HISTORIAL_MAX,
     });
 
-    const messages: Anthropic.MessageParam[] = historial
-      .reverse()
-      .map((message) => ({ role: message.role, content: message.content }));
-
-    messages.push({ role: 'user', content: texto });
-
-    const tools: Anthropic.Tool[] = CHAT_TOOLS.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
-    }));
+    const conversacion = this.proveedor.iniciar(
+      SYSTEM_PROMPT,
+      CHAT_TOOLS,
+      historial.reverse().map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      texto,
+    );
 
     const accionesEjecutadas: AccionEjecutada[] = [];
     const accionesPendientes: AccionPendiente[] = [];
@@ -188,81 +183,52 @@ export class ChatService {
     // Tope de vueltas: sin esto, un modelo que insiste con la misma herramienta
     // deja el request colgado.
     for (let iteracion = 0; iteracion < 6; iteracion += 1) {
-      const response = await this.client.messages.create({
-        model: MODEL,
-        max_tokens: 4000,
-        thinking: { type: 'adaptive' },
-        system: SYSTEM_PROMPT,
-        tools,
-        messages,
-      });
+      const turno = await this.pedirTurno(conversacion);
+      respuesta = turno.texto;
 
-      respuesta = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-        .map((block) => block.text)
-        .join('\n')
-        .trim();
+      if (turno.llamadas.length === 0) break;
 
-      if (response.stop_reason !== 'tool_use') break;
+      const resultados: ResultadoHerramienta[] = [];
 
-      const toolUses = response.content.filter(
-        (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-      );
-
-      messages.push({ role: 'assistant', content: response.content });
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-      for (const toolUse of toolUses) {
-        const spec = CHAT_TOOL_BY_NAME.get(toolUse.name);
-        const input = (toolUse.input ?? {}) as Record<string, any>;
+      for (const llamada of turno.llamadas) {
+        const spec = CHAT_TOOL_BY_NAME.get(llamada.name);
+        const input = llamada.input;
 
         // Politica de acciones autonomas: lo que cambia estado no se ejecuta
         // salvo que este habilitado por config o que el cliente lo confirme.
         const permitida =
-          spec?.readOnly || confirmar || ACCIONES_AUTONOMAS.has(toolUse.name);
+          spec?.readOnly || confirmar || ACCIONES_AUTONOMAS.has(llamada.name);
 
         if (!permitida) {
           const motivo = 'Requiere confirmacion explicita del cliente';
-          accionesPendientes.push({ accion: toolUse.name, parametros: input, motivo });
+          accionesPendientes.push({ accion: llamada.name, parametros: input, motivo });
 
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: JSON.stringify({
+          resultados.push({
+            llamada,
+            esError: false,
+            contenido: {
               ejecutada: false,
               motivo,
               instruccion:
                 'Explicale al cliente que vas a hacer y pedile que confirme. No digas que ya lo hiciste.',
-            }),
+            },
           });
           continue;
         }
 
         try {
-          const resultado = await this.runTool(clerkId, toolUse.name, input);
-          accionesEjecutadas.push({ accion: toolUse.name, parametros: input, resultado });
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            content: JSON.stringify(resultado),
-          });
+          const resultado = await this.runTool(clerkId, llamada.name, input);
+          accionesEjecutadas.push({ accion: llamada.name, parametros: input, resultado });
+          resultados.push({ llamada, esError: false, contenido: resultado });
         } catch (error) {
           // Un fallo de herramienta se le devuelve al modelo para que se lo
           // explique al cliente, en vez de romper todo el request.
-          this.logger.warn(`Herramienta ${toolUse.name} fallo: ${(error as Error).message}`);
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUse.id,
-            is_error: true,
-            content: (error as Error).message,
-          });
+          this.logger.warn(`Herramienta ${llamada.name} fallo: ${(error as Error).message}`);
+          resultados.push({ llamada, esError: true, contenido: (error as Error).message });
         }
       }
 
-      messages.push({ role: 'user', content: toolResults });
+      conversacion.agregarResultados(resultados);
     }
 
     await this.messageRepository.save([
@@ -281,6 +247,36 @@ export class ChatService {
       // Se deriva a un humano cuando quedo algo sin poder resolverse solo.
       requiereHumano: accionesPendientes.length > 0,
     };
+  }
+
+  /**
+   * Un turno del modelo, con reintento y espera creciente si el proveedor esta
+   * saturado (muy comun en el plan gratuito de Gemini). Reintentar es seguro:
+   * la conversacion solo cambia cuando un turno sale bien. Si no se recupera,
+   * se informa como 503 con un mensaje claro, no como un 500 generico.
+   */
+  private async pedirTurno(conversacion: Conversacion) {
+    const esperas = [1000, 3000];
+
+    for (let intento = 0; ; intento += 1) {
+      try {
+        return await conversacion.siguienteTurno();
+      } catch (error) {
+        if (!esSaturacion(error)) throw error;
+
+        this.logger.warn(
+          `${this.proveedor.nombre} saturado (intento ${intento + 1}): ${(error as Error).message}`,
+        );
+
+        if (intento >= esperas.length) {
+          throw new HttpException(
+            'El asistente esta saturado en este momento. Proba de nuevo en unos minutos.',
+            HttpStatus.SERVICE_UNAVAILABLE,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, esperas[intento]));
+      }
+    }
   }
 
   async getHistory(clerkId: string) {

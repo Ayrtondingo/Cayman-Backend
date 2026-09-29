@@ -3,9 +3,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import {
   Transaction,
   TransactionCategory,
@@ -20,9 +22,35 @@ import { User } from '../users/entities/user.entity';
 
 const CBU_REGEX = /^\d{22}$/;
 
+/**
+ * Cada cuanto se le pregunta al Banco Central por transferencias recibidas.
+ * El Central no avisa: el banco destino tiene que ir a buscarlas.
+ */
+const INTERVALO_ENTRANTES_MS = 5 * 60 * 1000;
+
+/**
+ * Ventana de GET /transactions, en minutos. Es el maximo que acepta el Central
+ * (24 hs): si el backend estuvo caido un rato, al volver todavia las encuentra.
+ * Leer la misma transferencia varias veces no duplica nada, porque se acredita
+ * una sola vez por su id del Central.
+ */
+const VENTANA_ENTRANTES_MIN = 1440;
+
+interface TransferenciaCentral {
+  _id?: string;
+  transaccionId?: string;
+  cbuOrigen: string;
+  cbuDestino: string;
+  importe: number | string;
+  estado: string;
+  personaOrigen?: { nombre?: string; apellido?: string } | null;
+}
+
 @Injectable()
-export class TransactionsService {
+export class TransactionsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TransactionsService.name);
+  private intervaloEntrantes?: NodeJS.Timeout;
+  private sincronizando = false;
 
   constructor(
     @InjectRepository(Transaction)
@@ -34,7 +62,23 @@ export class TransactionsService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly centralBankService: CentralBankService,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
+
+  onModuleInit() {
+    // La primera vuelta apenas arranca, asi se acredita lo que llego mientras
+    // el backend estaba apagado.
+    setTimeout(() => void this.sincronizarEntrantes(), 5000);
+    this.intervaloEntrantes = setInterval(
+      () => void this.sincronizarEntrantes(),
+      INTERVALO_ENTRANTES_MS,
+    );
+  }
+
+  onModuleDestroy() {
+    clearInterval(this.intervaloEntrantes);
+  }
 
   async createTransfer(
     clerkId: string,
@@ -178,7 +222,7 @@ export class TransactionsService {
       currency,
     });
 
-    return this.toFrontendTransaction(guardada, senderAccount.cbu);
+    return this.toFrontendTransaction(guardada, senderAccount.cbu, senderAccount.currency);
   }
 
   async getCombinedHistory(clerkId: string, currency: Currency = Currency.ARS) {
@@ -191,7 +235,7 @@ export class TransactionsService {
       throw new NotFoundException('Cuenta no encontrada');
     }
 
-    await this.syncIncomingTransactions(account);
+    await this.sincronizarEntrantes();
 
     const localTransactions = await this.transactionRepository.find({
       where: { account: { id: account.id } },
@@ -200,69 +244,114 @@ export class TransactionsService {
     });
 
     return localTransactions.map((transaction) =>
-      this.toFrontendTransaction(transaction, account.cbu),
+      this.toFrontendTransaction(transaction, account.cbu, account.currency),
     );
   }
 
-  private async syncIncomingTransactions(account: Account) {
-    const centralTransactions =
-      await this.centralBankService.getTransactions(30);
+  /**
+   * Acredita las transferencias que otros bancos (o este mismo) mandaron a
+   * cualquier caja de Cayman, en pesos o en dolares.
+   *
+   * Corre sola cada pocos minutos y tambien al pedir el historial. Antes solo
+   * corria al pedir el historial, solo para la caja en pesos y mirando 30
+   * minutos: lo que llegaba en dolares, o cuando nadie miraba, no se acreditaba
+   * nunca.
+   */
+  async sincronizarEntrantes() {
+    // Si ya hay una vuelta en curso, esta no hace falta: la otra va a leer lo mismo.
+    if (this.sincronizando) return;
+    this.sincronizando = true;
 
-    for (const tx of centralTransactions) {
-      const externalId = tx._id || tx.transaccionId;
-      const isIncoming = tx.cbuDestino === account.cbu;
+    try {
+      const transferencias: TransferenciaCentral[] =
+        await this.centralBankService.getTransactions(VENTANA_ENTRANTES_MIN);
 
-      if (
-        !externalId ||
-        !isIncoming ||
-        tx.estado !== TransactionStatus.APPROVED
-      ) {
-        continue;
+      for (const tx of transferencias ?? []) {
+        if (tx.estado !== TransactionStatus.APPROVED) continue;
+        try {
+          await this.acreditarEntrante(tx);
+        } catch (error) {
+          // Una que falla no frena a las demas; se reintenta en la proxima vuelta.
+          this.logger.error(
+            `No se pudo acreditar la transferencia ${tx._id ?? tx.transaccionId}: ${(error as Error).message}`,
+          );
+        }
       }
-
-      const existing = await this.transactionRepository.findOne({
-        where: { externalTransactionId: externalId },
-      });
-
-      if (existing) {
-        continue;
-      }
-
-      const amount = Number(tx.importe);
-
-      // Intentar obtener el nombre del emisor desde el banco central
-      let senderName: string | undefined;
-      if (tx.nombreOrigen) {
-        senderName = tx.nombreOrigen;
-      } else {
-        const person = await this.centralBankService.getPersonByCbu(
-          tx.cbuOrigen,
-        );
-        if (person) senderName = `${person.nombre} ${person.apellido}`;
-      }
-
-      account.balance = Number(account.balance) + amount;
-      await this.accountRepository.save(account);
-
-      const incoming = this.transactionRepository.create({
-        amount,
-        type: TransactionType.TRANSFER,
-        category: TransactionCategory.TRANSFERENCIA,
-        description: senderName
-          ? `Recibido de ${senderName}`
-          : `Recibido de CBU: ${tx.cbuOrigen}`,
-        account,
-        counterpartyCbu: tx.cbuOrigen,
-        counterpartyName: senderName,
-        externalTransactionId: externalId,
-        status: TransactionStatus.APPROVED,
-      });
-
-      await this.transactionRepository.save(incoming);
+    } catch (error) {
+      // Si el Central no responde, la proxima vuelta lo reintenta; la ventana
+      // de 24 hs alcanza para no perder nada.
+      this.logger.warn(
+        `No se pudieron leer las transferencias recibidas: ${(error as Error).message}`,
+      );
+    } finally {
+      this.sincronizando = false;
     }
   }
 
-  private toFrontendTransaction(transaction: Transaction, ownCbu: string) {
+  private async acreditarEntrante(tx: TransferenciaCentral) {
+    const externalId = tx._id || tx.transaccionId;
+    if (!externalId) return;
+
+    const account = await this.accountRepository.findOne({
+      where: { cbu: tx.cbuDestino },
+    });
+    // No es para una caja de este banco (es una que mandamos nosotros).
+    if (!account) return;
+
+    const yaAcreditada = await this.transactionRepository.exist({
+      where: { externalTransactionId: externalId },
+    });
+    if (yaAcreditada) return;
+
+    const origen = tx.personaOrigen;
+    let senderName =
+      origen?.nombre || origen?.apellido
+        ? `${origen.nombre ?? ''} ${origen.apellido ?? ''}`.trim()
+        : undefined;
+    if (!senderName) {
+      const person = await this.centralBankService.getPersonByCbu(tx.cbuOrigen);
+      if (person) senderName = `${person.nombre} ${person.apellido}`;
+    }
+
+    const amount = Number(tx.importe);
+
+    try {
+      // Movimiento y saldo juntos: primero el movimiento, que tiene el id del
+      // Central como clave unica. Si otra vuelta ya lo acredito, el INSERT falla
+      // y el saldo no se toca.
+      await this.dataSource.transaction(async (manager) => {
+        await manager.insert(Transaction, {
+          amount,
+          type: TransactionType.TRANSFER,
+          category: TransactionCategory.TRANSFERENCIA,
+          description: senderName
+            ? `Recibido de ${senderName}`
+            : `Recibido de CBU: ${tx.cbuOrigen}`,
+          account: { id: account.id },
+          counterpartyCbu: tx.cbuOrigen,
+          counterpartyName: senderName,
+          externalTransactionId: externalId,
+          status: TransactionStatus.APPROVED,
+        });
+        await manager.increment(Account, { id: account.id }, 'balance', amount);
+      });
+
+      this.logger.log(
+        `Acreditada transferencia ${externalId}: ${amount} ${account.currency} en ${account.cbu}`,
+      );
+    } catch (error) {
+      const duplicada =
+        error instanceof QueryFailedError &&
+        (error as QueryFailedError & { code?: string }).code === '23505';
+      if (!duplicada) throw error;
+    }
+  }
+
+  private toFrontendTransaction(
+    transaction: Transaction,
+    ownCbu: string,
+    currency: Currency,
+  ) {
     const amount = Number(transaction.amount);
 
     return {
@@ -275,6 +364,10 @@ export class TransactionsService {
       amount: Math.abs(amount),
       status: transaction.status,
       ownCbu,
+      // Para el comprobante: la moneda de la caja y el motivo (o, si fue
+      // rechazada, la razon del rechazo).
+      currency,
+      description: transaction.description || undefined,
     };
   }
 

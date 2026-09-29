@@ -1,0 +1,97 @@
+# Cayman Bank completo en un solo servidor: base, backend, frontend y Caddy
+# como proxy con HTTPS automatico.
+#
+# Espera los dos repos clonados uno al lado del otro:
+#   /opt/cayman/cayman-backend    (este repo; se corre desde deploy/)
+#   /opt/cayman/cayman-frontend
+#
+# Todo se publica bajo un mismo origen: /api va al backend y el resto al
+# frontend. Asi no hay CORS entre dominios y el navegador ve un solo sitio.
+#
+#   cd /opt/cayman/cayman-backend/deploy
+#   cp .env.example .env    # y completarlo
+#   docker compose up -d --build
+
+name: cayman
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cayman_bank
+      POSTGRES_USER: cayman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Falta POSTGRES_PASSWORD en deploy/.env}
+    volumes:
+      # postgres:18 guarda los datos en un subdirectorio por version: el
+      # volumen se monta un nivel arriba, como pide la imagen.
+      - db-data:/var/lib/postgresql
+      # Solo se aplica la primera vez, con el volumen vacio.
+      - ../docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cayman -d cayman_bank"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Sin `ports`: la base no queda expuesta a internet, solo la ve el backend.
+
+  backend:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: 4000
+      USE_DATABASE_URL: "false"
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: cayman
+      DB_PASS: ${POSTGRES_PASSWORD}
+      DB_NAME: cayman_bank
+      # El esquema lo crea docker/initdb; synchronize queda apagado siempre.
+      DB_SYNCHRONIZE: "false"
+      FRONTEND_URLS: ${URL_PUBLICA:?Falta URL_PUBLICA en deploy/.env}
+      ALLOW_VERCEL_PREVIEWS: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4000/api >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ../../cayman-frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${URL_PUBLICA}/api
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:?Falta CLERK_PUBLISHABLE_KEY en deploy/.env}
+    restart: unless-stopped
+    environment:
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?Falta CLERK_SECRET_KEY en deploy/.env}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY}
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITIO: ${SITIO:?Falta SITIO en deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,17 @@
+# SITIO sale de deploy/.env:
+#   - con dominio (cayman.ejemplo.com): Caddy saca el certificado HTTPS solo.
+#   - sin dominio (:80): sirve HTTP plano por la IP del droplet.
+{$SITIO} {
+	encode zstd gzip
+
+	# El backend ya tiene el prefijo /api, asi que se pasa tal cual.
+	# `/api` solo es el healthcheck.
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy backend:4000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

@@ -1,15 +1,25 @@
 /**
  * Adaptadores del asistente a cada proveedor de modelos.
  *
- * El bucle de herramientas y la politica de acciones autonomas viven en
- * ChatService y no dependen del proveedor: cada adaptador solo traduce el
- * historial, las herramientas y los resultados al formato de su API.
+ * Cada adaptador solo traduce el historial, las herramientas y los resultados
+ * al formato de su API. Hoy el asistente de la landing no usa herramientas
+ * (no ve ninguna cuenta), pero el soporte queda por si se vuelve a necesitar.
  *
  * Se elige con CHAT_PROVIDER (anthropic | gemini).
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { Content, GoogleGenAI } from '@google/genai';
-import { ChatToolSpec } from './chat.tools';
+
+/** Herramienta que el modelo puede pedir. JSON Schema en `inputSchema`. */
+export interface ChatToolSpec {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
 
 export interface MensajePrevio {
   role: 'user' | 'assistant';
@@ -89,7 +99,8 @@ class ProveedorAnthropic implements ProveedorChat {
           max_tokens: 4000,
           thinking: { type: 'adaptive' },
           system,
-          tools,
+          // Sin herramientas no se manda el campo: la API no acepta una lista vacia.
+          ...(tools.length > 0 ? { tools } : {}),
           messages,
         });
 
@@ -187,7 +198,9 @@ class ProveedorGemini implements ProveedorChat {
             contents,
             config: {
               systemInstruction: system,
-              tools: [{ functionDeclarations }],
+              ...(functionDeclarations.length > 0
+                ? { tools: [{ functionDeclarations }] }
+                : {}),
             },
           });
           modeloFijo = modelo;

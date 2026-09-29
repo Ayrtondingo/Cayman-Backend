@@ -61,10 +61,9 @@ services:
       # CHAT_MODEL es opcional: sin definirla se usa el modelo por defecto de
       # cada proveedor. Con gemini acepta una lista separada por comas que se
       # prueba en orden si un modelo esta saturado.
-      # Acciones que el asistente puede ejecutar SIN confirmación del cliente.
-      # Vacío = ninguna. La cátedra todavía no definió esta política.
-      - key: CHAT_ACCIONES_AUTONOMAS
-        value: ""
+      # Mensajes por visitante (IP) por hora en el chat público de la landing.
+      - key: CHAT_LIMITE_POR_HORA
+        value: "20"
 
       # --------------------------------------------- Parámetros de negocio
       # Todos tienen default en el código; se declaran acá para poder ajustarlos

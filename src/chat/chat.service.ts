@@ -5,148 +5,74 @@ import {
   Injectable,
   Logger,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { ChatMessage, ChatRole } from './entities/chat-message.entity';
-import { Escalation, EscalationStatus } from './entities/escalation.entity';
-import { User } from '../users/entities/user.entity';
-import { AccountsService } from '../accounts/accounts.service';
-import { CardsService } from '../cards/cards.service';
-import { LoansService } from '../loans/loans.service';
-import { ReportsService } from '../reports/reports.service';
-import { DolarService } from '../market/dolar.service';
-import { CHAT_TOOLS, CHAT_TOOL_BY_NAME } from './chat.tools';
 import {
   Conversacion,
   crearProveedorChat,
   esSaturacion,
-  ResultadoHerramienta,
+  MensajePrevio,
 } from './chat.providers';
 
-/**
- * Acciones que cambian estado y que el asistente PUEDE ejecutar sin confirmacion.
- *
- * Arranca vacio a proposito: la catedra todavia no definio la politica de
- * acciones autonomas, asi que por defecto toda accion queda pendiente de que
- * el cliente la confirme. Para habilitar alguna:
- *   CHAT_ACCIONES_AUTONOMAS=bloquear_tarjeta
- */
-const ACCIONES_AUTONOMAS = new Set(
-  (process.env.CHAT_ACCIONES_AUTONOMAS || '')
-    .split(',')
-    .map((accion) => accion.trim())
-    .filter(Boolean),
-);
+/** Mensajes por visitante (IP) en la ventana de abajo. */
+const LIMITE_MENSAJES = Number(process.env.CHAT_LIMITE_POR_HORA ?? 20);
+const VENTANA_LIMITE_MS = 60 * 60 * 1000;
 
-/** Cuantos mensajes previos se le mandan al modelo como contexto. */
-const HISTORIAL_MAX = Number(process.env.CHAT_HISTORIAL ?? 20);
+/** Topes para que un solo pedido no gaste de mas la cuota del modelo. */
+const MAX_CARACTERES = 500;
+const MAX_HISTORIAL = 10;
 
-const SYSTEM_PROMPT = `Sos el asistente de atencion al cliente de Cayman Bank, un banco argentino.
+const SYSTEM_PROMPT = `Sos el asistente virtual de Cayman Bank, un banco argentino (entidad N.º 19).
+Atendes a cualquier persona desde la pagina publica del banco, este o no registrada.
 
-Hablas en espanol rioplatense, de forma clara y breve. No inventas datos: si necesitas
-informacion de la cuenta del cliente, la buscas con las herramientas disponibles.
+Hablas en espanol rioplatense, de forma clara y breve.
+
+Podes responder preguntas generales:
+- Que productos ofrece el banco: cajas de ahorro en pesos y en dolares, transferencias
+  a cualquier CBU o alias del pais, tarjetas de debito y credito, prestamos personales,
+  plazos fijos, CEDEARs, seguros, pago de servicios y recargas de celular.
+- Los plazos fijos, los prestamos y la compra de CEDEARs son solo en pesos. En dolares
+  se puede tener la caja de ahorro y transferir a otras cajas en dolares.
+- Como se abre una cuenta: registrandose en la pagina con su email y completando sus datos.
+- Conceptos bancarios y financieros en general: que es un CBU, un alias, un plazo fijo,
+  una TNA, un CEDEAR, como funciona una transferencia, etc.
 
 Reglas:
-- Los datos que devuelven las herramientas son siempre del cliente autenticado. Nunca
-  pidas ni aceptes que te pasen el CBU o el DNI de otra persona para consultarlos.
-- Los montos van en pesos argentinos salvo que la herramienta indique otra moneda.
-- Si el cliente pide algo que no podes resolver (un reclamo, un error de la cuenta, un
-  fraude ya consumado), decile que lo vas a derivar a un representante.
-- No des consejos de inversion. Podes explicar como funciona un producto, no recomendar
-  si conviene o no.
-- Si una accion queda pendiente de confirmacion, explicale al cliente exactamente que
-  va a pasar cuando confirme.`;
-
-export interface AccionEjecutada {
-  accion: string;
-  parametros: unknown;
-  resultado: unknown;
-}
-
-export interface AccionPendiente {
-  accion: string;
-  parametros: unknown;
-  motivo: string;
-}
+- NO tenes acceso a ninguna cuenta ni a datos de clientes. Si te preguntan por un saldo,
+  un movimiento, una tarjeta, un prestamo o cualquier dato de su cuenta, explica que
+  eso se consulta ingresando al homebanking, y no intentes adivinarlo.
+- Nunca pidas ni aceptes datos personales o sensibles: DNI, CBU, numero de tarjeta,
+  claves o codigos. Si alguien los escribe, avisale que no los comparta por este medio.
+- No inventes tasas, montos, comisiones ni condiciones. Si te preguntan valores
+  concretos, deci que se ven en el homebanking y que pueden cambiar.
+- No des consejos de inversion: podes explicar como funciona un producto, no
+  recomendar si conviene.
+- Si la pregunta no tiene que ver con el banco ni con temas financieros, responde
+  amablemente que solo podes ayudar con consultas sobre Cayman Bank.
+- Es un proyecto academico: si preguntan, aclara que no es una entidad financiera real.`;
 
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
-
   private readonly proveedor = crearProveedorChat();
 
-  constructor(
-    @InjectRepository(ChatMessage)
-    private readonly messageRepository: Repository<ChatMessage>,
-    @InjectRepository(Escalation)
-    private readonly escalationRepository: Repository<Escalation>,
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
-    private readonly accountsService: AccountsService,
-    private readonly cardsService: CardsService,
-    private readonly loansService: LoansService,
-    private readonly reportsService: ReportsService,
-    private readonly dolarService: DolarService,
-  ) {}
+  /** Momentos de los ultimos mensajes de cada IP. En memoria: se reinicia con el backend. */
+  private readonly usoPorIp = new Map<string, number[]>();
 
   /**
-   * Ejecuta una herramienta contra los servicios del banco.
-   * Siempre opera sobre el cliente autenticado: el clerkId no sale del backend.
-   */
-  private async runTool(
-    clerkId: string,
-    name: string,
-    input: Record<string, any>,
-  ): Promise<unknown> {
-    switch (name) {
-      case 'consultar_saldos':
-        return this.accountsService.getBalances(clerkId);
-
-      case 'consultar_movimientos': {
-        const cbu =
-          input.cbu ?? (await this.accountsService.findPrimary(clerkId))?.cbu;
-        if (!cbu) return { error: 'El cliente no tiene una caja de ahorro con CBU' };
-        const movimientos = await this.accountsService.getMovements(clerkId, cbu);
-        return movimientos.slice(0, Number(input.limite ?? 10));
-      }
-
-      case 'consultar_gastos_por_categoria': {
-        const cbu = (await this.accountsService.findPrimary(clerkId))?.cbu;
-        if (!cbu) return { error: 'El cliente no tiene una caja de ahorro con CBU' };
-        return this.reportsService.expenseSummary(clerkId, cbu, input.periodo);
-      }
-
-      case 'listar_tarjetas':
-        return this.cardsService.findAllByUser(clerkId);
-
-      case 'consultar_prestamos':
-        return this.loansService.findAllByUser(clerkId);
-
-      case 'consultar_cotizacion_dolar':
-        return this.dolarService.getCotizacionOperativa();
-
-      case 'bloquear_tarjeta':
-        return this.cardsService.setBlock(
-          clerkId,
-          Number(input.tarjetaId),
-          String(input.accion),
-        );
-
-      default:
-        return { error: `Herramienta desconocida: ${name}` };
-    }
-  }
-
-  /**
-   * Procesa un mensaje del cliente.
+   * Responde una pregunta general desde la landing. No ve ninguna cuenta:
+   * no tiene herramientas y no sabe quien pregunta.
    *
-   * El bucle de herramientas es manual y no el tool runner del SDK porque hace
-   * falta interceptar cada llamada ANTES de ejecutarla, para frenar las acciones
-   * que cambian estado y que todavia no estan autorizadas.
+   * El historial lo guarda el navegador y lo manda en cada mensaje; el backend
+   * no persiste nada.
    */
-  async sendMessage(clerkId: string, texto: string, confirmar = false) {
-    if (!texto?.trim()) {
+  async responder(ip: string, texto: string, historial: MensajePrevio[] = []) {
+    const limpio = texto?.trim();
+    if (!limpio) {
       throw new BadRequestException('El mensaje no puede estar vacio');
+    }
+    if (limpio.length > MAX_CARACTERES) {
+      throw new BadRequestException(
+        `El mensaje no puede superar los ${MAX_CARACTERES} caracteres`,
+      );
     }
 
     if (!this.proveedor.configurado) {
@@ -156,104 +82,58 @@ export class ChatService {
       );
     }
 
-    const user = await this.userRepository.findOne({ where: { id: clerkId } });
-    if (!user) throw new BadRequestException('Usuario no encontrado');
+    this.registrarUso(ip);
 
-    const historial = await this.messageRepository.find({
-      where: { user: { id: clerkId } },
-      order: { createdAt: 'DESC' },
-      take: HISTORIAL_MAX,
-    });
+    const previos = (Array.isArray(historial) ? historial : [])
+      .filter(
+        (mensaje) =>
+          (mensaje?.role === 'user' || mensaje?.role === 'assistant') &&
+          typeof mensaje.content === 'string' &&
+          mensaje.content.trim(),
+      )
+      .slice(-MAX_HISTORIAL)
+      .map((mensaje) => ({
+        role: mensaje.role,
+        content: mensaje.content.slice(0, 4000),
+      }));
 
-    const conversacion = this.proveedor.iniciar(
-      SYSTEM_PROMPT,
-      CHAT_TOOLS,
-      historial.reverse().map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
-      texto,
+    const conversacion = this.proveedor.iniciar(SYSTEM_PROMPT, [], previos, limpio);
+    const turno = await this.pedirTurno(conversacion);
+
+    return { respuesta: turno.texto };
+  }
+
+  /** Corta con 429 si la IP ya uso su cupo de la ultima hora. */
+  private registrarUso(ip: string) {
+    const ahora = Date.now();
+    const recientes = (this.usoPorIp.get(ip) ?? []).filter(
+      (momento) => ahora - momento < VENTANA_LIMITE_MS,
     );
 
-    const accionesEjecutadas: AccionEjecutada[] = [];
-    const accionesPendientes: AccionPendiente[] = [];
-
-    let respuesta = '';
-
-    // Tope de vueltas: sin esto, un modelo que insiste con la misma herramienta
-    // deja el request colgado.
-    for (let iteracion = 0; iteracion < 6; iteracion += 1) {
-      const turno = await this.pedirTurno(conversacion);
-      respuesta = turno.texto;
-
-      if (turno.llamadas.length === 0) break;
-
-      const resultados: ResultadoHerramienta[] = [];
-
-      for (const llamada of turno.llamadas) {
-        const spec = CHAT_TOOL_BY_NAME.get(llamada.name);
-        const input = llamada.input;
-
-        // Politica de acciones autonomas: lo que cambia estado no se ejecuta
-        // salvo que este habilitado por config o que el cliente lo confirme.
-        const permitida =
-          spec?.readOnly || confirmar || ACCIONES_AUTONOMAS.has(llamada.name);
-
-        if (!permitida) {
-          const motivo = 'Requiere confirmacion explicita del cliente';
-          accionesPendientes.push({ accion: llamada.name, parametros: input, motivo });
-
-          resultados.push({
-            llamada,
-            esError: false,
-            contenido: {
-              ejecutada: false,
-              motivo,
-              instruccion:
-                'Explicale al cliente que vas a hacer y pedile que confirme. No digas que ya lo hiciste.',
-            },
-          });
-          continue;
-        }
-
-        try {
-          const resultado = await this.runTool(clerkId, llamada.name, input);
-          accionesEjecutadas.push({ accion: llamada.name, parametros: input, resultado });
-          resultados.push({ llamada, esError: false, contenido: resultado });
-        } catch (error) {
-          // Un fallo de herramienta se le devuelve al modelo para que se lo
-          // explique al cliente, en vez de romper todo el request.
-          this.logger.warn(`Herramienta ${llamada.name} fallo: ${(error as Error).message}`);
-          resultados.push({ llamada, esError: true, contenido: (error as Error).message });
-        }
-      }
-
-      conversacion.agregarResultados(resultados);
+    if (recientes.length >= LIMITE_MENSAJES) {
+      throw new HttpException(
+        'Llegaste al limite de mensajes por hora. Proba de nuevo mas tarde.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
-    await this.messageRepository.save([
-      this.messageRepository.create({ role: ChatRole.USER, content: texto, user }),
-      this.messageRepository.create({
-        role: ChatRole.ASSISTANT,
-        content: respuesta,
-        user,
-      }),
-    ]);
+    recientes.push(ahora);
+    this.usoPorIp.set(ip, recientes);
 
-    return {
-      respuesta,
-      accionesEjecutadas,
-      accionesPendientes,
-      // Se deriva a un humano cuando quedo algo sin poder resolverse solo.
-      requiereHumano: accionesPendientes.length > 0,
-    };
+    // Limpieza ocasional para que el mapa no crezca sin fin.
+    if (this.usoPorIp.size > 5000) {
+      for (const [clave, momentos] of this.usoPorIp) {
+        if (momentos.every((momento) => ahora - momento >= VENTANA_LIMITE_MS)) {
+          this.usoPorIp.delete(clave);
+        }
+      }
+    }
   }
 
   /**
    * Un turno del modelo, con reintento y espera creciente si el proveedor esta
-   * saturado (muy comun en el plan gratuito de Gemini). Reintentar es seguro:
-   * la conversacion solo cambia cuando un turno sale bien. Si no se recupera,
-   * se informa como 503 con un mensaje claro, no como un 500 generico.
+   * saturado (muy comun en el plan gratuito de Gemini). Si no se recupera, se
+   * informa como 503 con un mensaje claro, no como un 500 generico.
    */
   private async pedirTurno(conversacion: Conversacion) {
     const esperas = [1000, 3000];
@@ -277,73 +157,5 @@ export class ChatService {
         await new Promise((resolve) => setTimeout(resolve, esperas[intento]));
       }
     }
-  }
-
-  async getHistory(clerkId: string) {
-    const messages = await this.messageRepository.find({
-      where: { user: { id: clerkId } },
-      order: { createdAt: 'ASC' },
-      take: 200,
-    });
-
-    return messages.map((message) => ({
-      id: message.id,
-      rol: message.role,
-      texto: message.content,
-      fecha: message.createdAt,
-    }));
-  }
-
-  async clearHistory(clerkId: string) {
-    const { affected } = await this.messageRepository.delete({
-      user: { id: clerkId },
-    });
-    return { borrados: affected ?? 0 };
-  }
-
-  /** Deriva la conversacion a un representante humano. */
-  async escalate(clerkId: string, motivo: string) {
-    const user = await this.userRepository.findOne({ where: { id: clerkId } });
-    if (!user) throw new BadRequestException('Usuario no encontrado');
-
-    if (!motivo?.trim()) {
-      throw new BadRequestException('Hay que indicar el motivo de la derivacion');
-    }
-
-    const escalation = await this.escalationRepository.save(
-      this.escalationRepository.create({
-        motivo,
-        status: EscalationStatus.PENDIENTE,
-        user,
-      }),
-    );
-
-    return {
-      id: escalation.id,
-      estado: escalation.status,
-      motivo: escalation.motivo,
-      fecha: escalation.createdAt,
-    };
-  }
-
-  /** Cola de derivaciones, para el personal del banco. */
-  async listEscalations() {
-    const escalations = await this.escalationRepository.find({
-      relations: ['user'],
-      order: { createdAt: 'DESC' },
-      take: 100,
-    });
-
-    return escalations.map((escalation) => ({
-      id: escalation.id,
-      estado: escalation.status,
-      motivo: escalation.motivo,
-      fecha: escalation.createdAt,
-      cliente: {
-        id: escalation.user?.id,
-        nombre: escalation.user?.fullName,
-        email: escalation.user?.email,
-      },
-    }));
   }
 }

@@ -4,6 +4,9 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  // Detras de un proxy (Caddy en el droplet, Render): sin esto req.ip es la IP
+  // del proxy y el limite de mensajes del chat seria uno solo para todos.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
   const port = Number(process.env.PORT) || 4000;
   const frontendUrls = (
     process.env.FRONTEND_URLS ||

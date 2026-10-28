@@ -21,7 +21,7 @@ import {
 const round2 = (value: number) => Math.round(value * 100) / 100;
 
 /** Bono de bienvenida al abrir la caja en dolares. */
-const BONO_USD = Number(process.env.BONO_APERTURA_USD ?? 10000);
+const BONO_USD = Number(process.env.BONO_APERTURA_USD ?? 1000);
 
 @Injectable()
 export class AccountsService {
